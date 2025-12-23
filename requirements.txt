@@ -1,0 +1,4 @@
+customtkinter
+guessit
+cinemagoer
+duckduckgo-search
