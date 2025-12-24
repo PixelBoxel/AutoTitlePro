@@ -4,7 +4,7 @@ import threading
 import os
 import tkinter.messagebox
 import re
-from renamer import AutoRenamer
+from renamer import AutoRenamer, __version__
 
 class AutoTitleApp(customtkinter.CTk):
     def __init__(self):
@@ -26,7 +26,19 @@ class AutoTitleApp(customtkinter.CTk):
         self.header_frame.grid(row=0, column=0, padx=20, pady=20, sticky="ew")
         
         self.label = customtkinter.CTkLabel(self.header_frame, text="AutoTitlePro", font=customtkinter.CTkFont(size=20, weight="bold"))
-        self.label.pack(pady=10)
+        self.label.pack(side="left", padx=10)
+        
+        # Settings Button
+        self.settings_button = customtkinter.CTkButton(self.header_frame, text="⚙ Settings", width=100, command=self.open_settings)
+        self.settings_button.pack(side="right", padx=10)
+
+        # Settings Storage (Default values)
+        self.settings = {
+            "organize": True,
+            "title_case": True,
+            "dark_mode": True,
+            "rename_files": True 
+        }
 
         # Content Area - Scrollable Frame for file list
         self.scrollable_frame = customtkinter.CTkScrollableFrame(self, label_text="Files Found")
@@ -43,13 +55,57 @@ class AutoTitleApp(customtkinter.CTk):
         self.select_button = customtkinter.CTkButton(self.footer_frame, text="Select Directory", command=self.select_directory)
         self.select_button.pack(side="left", padx=10, pady=10)
 
-        self.run_button = customtkinter.CTkButton(self.footer_frame, text="Start Renaming", state="disabled", command=self.start_renaming)
+        self.run_button = customtkinter.CTkButton(self.footer_frame, text="Start Processing", state="disabled", command=self.start_renaming)
         self.run_button.pack(side="right", padx=10, pady=10)
         
         self.current_label = customtkinter.CTkLabel(self.footer_frame, text="")
         
         self.progress_bar = customtkinter.CTkProgressBar(self.footer_frame)
         self.progress_bar.set(0)
+
+    def open_settings(self):
+        self.settings_window = customtkinter.CTkToplevel(self)
+        self.settings_window.title("Settings")
+        self.settings_window.geometry("400x300")
+        
+        # Make modal
+        self.settings_window.grab_set()
+        
+        # Title
+        lbl = customtkinter.CTkLabel(self.settings_window, text="Preferences", font=customtkinter.CTkFont(size=16, weight="bold"))
+        lbl.pack(pady=(10, 5))
+        
+        # Version
+        v_lbl = customtkinter.CTkLabel(self.settings_window, text=f"AutoTitlePro {__version__}", text_color="gray")
+        v_lbl.pack(pady=(0, 10))
+        
+        # 1. Dark Mode
+        self.sw_dark = customtkinter.CTkSwitch(self.settings_window, text="Dark Mode", command=self.toggle_theme)
+        if self.settings["dark_mode"]: self.sw_dark.select()
+        self.sw_dark.pack(pady=10, data=None) # simple pack
+        
+        # 2. Rename Files
+        self.sw_rename = customtkinter.CTkSwitch(self.settings_window, text="Rename Files", command=lambda: self.update_setting("rename_files", self.sw_rename.get()))
+        if self.settings["rename_files"]: self.sw_rename.select()
+        self.sw_rename.pack(pady=10)
+        
+        # 3. Organize (Move) Files
+        self.sw_org = customtkinter.CTkSwitch(self.settings_window, text="Organize into Folders", command=lambda: self.update_setting("organize", self.sw_org.get()))
+        if self.settings["organize"]: self.sw_org.select()
+        self.sw_org.pack(pady=10)
+        
+        # 4. Title Case
+        self.sw_case = customtkinter.CTkSwitch(self.settings_window, text="Enforce Title Case", command=lambda: self.update_setting("title_case", self.sw_case.get()))
+        if self.settings["title_case"]: self.sw_case.select()
+        self.sw_case.pack(pady=10)
+        
+    def update_setting(self, key, value):
+        self.settings[key] = bool(value)
+        
+    def toggle_theme(self):
+        val = self.sw_dark.get()
+        self.settings["dark_mode"] = bool(val)
+        customtkinter.set_appearance_mode("Dark" if val else "Light")
 
     def select_directory(self):
         if self.is_scanning:
@@ -246,6 +302,8 @@ class AutoTitleApp(customtkinter.CTk):
         success_count = 0
         directories_to_check = set()
         
+        rename_enabled = self.settings.get("rename_files", True)
+        
         for i, (original, new_name, full_new_path, status, options) in enumerate(self.scanned_files):
             if status == "Skipped":
                 continue
@@ -253,24 +311,30 @@ class AutoTitleApp(customtkinter.CTk):
             # Check for exact match (File is already named correctly)
             if original == full_new_path:
                 self.scanned_files[i] = (original, new_name, full_new_path, "File OK", options)
-                # Still count as success/processed? Yes.
-                # success_count += 1
-                # Must check folder organization still!
                 directories_to_check.add(os.path.dirname(original))
                 continue
 
             if full_new_path and original != full_new_path:
-                if self.renamer.rename_file(original, full_new_path):
-                    self.scanned_files[i] = (original, new_name, full_new_path, "Renamed", options)
-                    success_count += 1
-                    # Add parent directory of the NEW path (which is same as old usually) to check list
-                    directories_to_check.add(os.path.dirname(original))
+                if rename_enabled:
+                    if self.renamer.rename_file(original, full_new_path):
+                        self.scanned_files[i] = (original, new_name, full_new_path, "Renamed", options)
+                        success_count += 1
+                        # Add parent directory of the NEW path (which is same as old usually) to check list
+                        directories_to_check.add(os.path.dirname(original))
+                    else:
+                        self.scanned_files[i] = (original, new_name, full_new_path, "Error", options)
                 else:
-                    self.scanned_files[i] = (original, new_name, full_new_path, "Error", options)
+                    # Rename disabled, just treat as "Renamed" (logically ready) for organization
+                    # But we must update the PATH in the tuple to the ORIGINAL path if we didn't rename
+                    # Wait, if we don't rename, the file is still at 'original'.
+                    # For organization to work, it expects the file at its current location.
+                    self.scanned_files[i] = (original, new_name, original, "Skipped Rename", options)
+                    directories_to_check.add(os.path.dirname(original))
         
         # Clean up and organize folders based on renamed files
         # We pass the entire list because we need to know status and paths
-        org_stats = self.renamer.organize_files(self.scanned_files, self.current_directory)
+        # PASS SETTINGS HERE
+        org_stats = self.renamer.organize_files(self.scanned_files, self.current_directory, self.settings)
         
         self.after(0, lambda: self.finish_renaming(success_count, org_stats))
 

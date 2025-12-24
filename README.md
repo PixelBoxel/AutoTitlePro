@@ -4,7 +4,7 @@
 
 AutoTitlePro is a powerful Windows utility that automatically identifies, renames, and organizes your video files (Movies & TV Shows) using a combination of local heuristics, context inference, and IMDb metadata.
 
-**Version**: v2025.12.24.05
+**Version**: v2025.12.24.08
 
 ## 🚀 Key Features
 
@@ -16,12 +16,12 @@ AutoTitlePro is a powerful Windows utility that automatically identifies, rename
 ### 📂 Deep Organization & Hygiene
 *   **Strict Flattening**: Enforces a clean `Show Name` > `Show Name - Season X` > `Files` hierarchy. It detects and fixes recursive/nested folders (e.g. `Halo/halo - season 2/Halo...`) by pulling files up to the top level.
 *   **Universal Standardization**: Enforces **Title Case** on EVERY filename and folder (e.g. `breaking bad` -> `Breaking Bad`, `season 1` -> `Season 1`) for a perfectly uniform library.
-*   **Loose File Cleanup**: Moves files from generic folders (like `Downloads`) into their correct Show/Season directories.
+*   **Companion File Support**: Automatically detects, renames, and moves subtitles (`.srt`, `.vtt`), artwork (`.jpg`, `.png`), and metadata (`.nfo`) files along with your videos. No orphan left behind!
 
 ### 🛡️ Safety & Control
+*   **Settings Dashboard**: Fine-tune your experience. Toggle **Rename Files**, **Organize Folders**, **Title Case**, or **Dark Mode** on/off.
 *   **Review First**: "Unknown" or low-confidence matches are automatically sorted to the top for review.
 *   **Non-Destructive**: Files marked "Unknown" are skipped by default.
-*   **Organize Only**: If a file is already named correctly, the app skips renaming (saving time) but *still* fixes its folder structure and casing.
 
 ## 📝 Naming Conventions
 

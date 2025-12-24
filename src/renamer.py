@@ -7,7 +7,8 @@ import datetime
 
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
-__version__ = f"v{now.year}.{now.month:02d}.{now.day:02d}.{now.hour:02d}"
+# Static version for release tracking
+__version__ = "v2025.12.24.08"
 
 class AutoRenamer:
     def __init__(self):
@@ -197,21 +198,53 @@ class AutoRenamer:
         return None
 
     def rename_file(self, old_path, new_path):
-        """Renames the file."""
+        """Renames the file and any companion files (subtitles, etc)."""
+        COMPANION_EXTS = {'.srt', '.sub', '.idx', '.vtt', '.ssa', '.ass', '.nfo', '.jpg', '.jpeg', '.png', '.txt'}
+        
         try:
             os.rename(old_path, new_path)
+            
+            # Rename companions
+            old_base = os.path.splitext(old_path)[0]
+            new_base = os.path.splitext(new_path)[0]
+            
+            dirname = os.path.dirname(old_path)
+            
+            # Check for suffixes (case-insensitive check would be better but simple suffix loop works for now)
+            # Actually, standard OS filesystems are tricky.
+            # Best way: listdir and check startswith? No, too slow.
+            # Just check the set.
+            for ext in COMPANION_EXTS:
+                old_comp = old_base + ext
+                if os.path.exists(old_comp):
+                    new_comp = new_base + ext
+                    try:
+                        os.rename(old_comp, new_comp)
+                        print(f"DEBUG: Renamed companion {old_comp} -> {new_comp}")
+                    except OSError as e:
+                        print(f"Error renaming companion {old_comp}: {e}")
+            
             return True
         except OSError as e:
             print(f"Error renaming {old_path} to {new_path}: {e}")
             return False
 
-    def organize_files(self, scanned_files, scan_root):
+    def organize_files(self, scanned_files, scan_root, settings=None):
         """
         Restructures folders to ensure 'Show Name/Show Name - Season X/File' hierarchy.
         Uses scan_root and 'Show Name' anchors to flatten recursive/messy structures.
         """
+        if settings is None: settings = {}
         
+        organize_enabled = settings.get("organize", True)
+        title_case_enabled = settings.get("title_case", True)
+        
+        # If organization is disabled, we do nothing but return empty stats
+        if not organize_enabled:
+            return {"status": "Organization Disabled"}
+            
         stats = {"folders_created": 0, "folders_renamed": 0, "files_moved": 0, "folders_moved": 0}
+        COMPANION_EXTS = {'.srt', '.sub', '.idx', '.vtt', '.ssa', '.ass', '.nfo', '.jpg', '.jpeg', '.png', '.txt'}
         
         # Set of source directories we have moved files FROM, to clean up later
         cleanup_candidates = set()
@@ -229,7 +262,7 @@ class AutoRenamer:
         for item in scanned_files:
             original, new_name, current_path, status, _ = item
             
-            valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)"]
+            valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)", "Skipped Rename"]
             if status not in valid_statuses or not current_path or not os.path.exists(current_path):
                 continue
                 
@@ -243,13 +276,9 @@ class AutoRenamer:
             season_num = int(match.group(2))
             
             # Enforce Title Case for Folders (Uniformity)
-            # Use string.title() or similar. 
-            # Note: This might mismatch the filename if the file is lowercase "halo".
-            # But the user asked to rename the *folders* for uniformity.
             show_name = raw_show_name.strip()
-            # Heuristic: If it starts with lower, title it. 
-            # Simple .title() handles "halo" -> "Halo".
-            show_name = show_name.title()
+            if title_case_enabled:
+                show_name = show_name.title()
             
             target_season_dir_name = f"{show_name} - Season {season_num}"
             target_show_dir_name = show_name
@@ -363,6 +392,20 @@ class AutoRenamer:
                     try:
                         os.rename(abs_current, final_file_path)
                         stats["files_moved"] += 1
+                        
+                        # Move Companions
+                        old_base_path = os.path.splitext(abs_current)[0]
+                        new_base_path = os.path.splitext(final_file_path)[0]
+                        for ext in COMPANION_EXTS:
+                            old_comp = old_base_path + ext
+                            if os.path.exists(old_comp):
+                                new_comp = new_base_path + ext
+                                try:
+                                    os.rename(old_comp, new_comp)
+                                    print(f"DEBUG: Moved companion {old_comp} -> {new_comp}")
+                                except OSError as e:
+                                    print(f"Error moving companion {old_comp}: {e}")
+                                    
                         # Update current_path reference if we were tracking it (scanned_files is distinct)
                         cleanup_candidates.add(os.path.dirname(abs_current))
                     except OSError as e:
