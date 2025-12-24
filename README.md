@@ -4,7 +4,7 @@
 
 AutoTitlePro is a powerful Windows utility that automatically identifies, renames, and organizes your video files (Movies & TV Shows) using a combination of local heuristics, context inference, and IMDb metadata.
 
-**Version**: v2025.12.24.16
+**Version**: v2025.12.24.10
 
 ## 🚀 Key Features
 
@@ -27,7 +27,12 @@ AutoTitlePro is a powerful Windows utility that automatically identifies, rename
 *   **Universal Standardization**: Enforces **Title Case** on EVERY filename and folder.
 *   **Companion File Support**: Automatically renames and moves subtitles (`.srt`, `.vtt`), artwork/posters (`.jpg`), and metadata (`.nfo`) along with video files.
 
-### 🛡️ Safety & Control
+### 🛡️ Crash Protection & Stability
+*   **Active Watchdog**: A background monitor detecting hangs during large scans. If the app freezes for >30s, it automatically dumps a crash log for debugging.
+*   **Large Library Support**: Optimized for libraries with 10,000+ files using smart pagination and non-blocking scanning.
+
+### 👓 Visibility & Control
+*   **Show Unchanged Files**: Toggle visibility of files that are already named correctly to verify your entire library.
 *   **Folder Preview Tab**: A dedicated tab that shows you **Folder Renames** (Yellow) and **Folder Creations** (Green) *before* you click process.
 *   **Review First**: "Unknown" or low-confidence matches are automatically sorted to the top for review.
 *   **Non-Destructive**: Files marked "Unknown" are skipped by default.
@@ -40,10 +45,25 @@ AutoTitlePro is a powerful Windows utility that automatically identifies, rename
 
 ## 📦 Installation
 
+
+1.  **Download**: Get the latest `AutoTitlePro.exe` from the Releases page.
+2.  **No Installation Required**: Just double-click the `.exe` to launch.
+    *   *Note: First launch might be slower as it extracts resources.*
+
+### 🛠️ Build from Source
+
 1.  **Install Python 3.10+**.
 2.  **Install Dependencies**:
     ```bash
     pip install -r requirements.txt
+    ```
+3.  **Run**:
+    ```bash
+    python src/main.py
+    ```
+    *Or build your own .exe:*
+    ```bash
+    python build.py
     ```
 
 ## 🎮 Usage

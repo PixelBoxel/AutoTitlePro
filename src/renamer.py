@@ -8,17 +8,18 @@ import datetime
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
 # Static version for release tracking
-__version__ = "v2025.12.24.16"
+__version__ = "v2025.12.24.10"
 
 class AutoRenamer:
     def __init__(self):
         self.ia = Cinemagoer()
 
-    def scan_directory(self, path):
+    def scan_directory(self, path, progress_callback=None):
         """Recursively finds video files in the given directory."""
         video_extensions = ('.mp4', '.mkv', '.avi', '.mov', '.wmv')
         files = []
         for root, _, filenames in os.walk(path):
+            if progress_callback: progress_callback()
             for filename in filenames:
                 if filename.lower().endswith(video_extensions):
                     files.append(os.path.join(root, filename))
