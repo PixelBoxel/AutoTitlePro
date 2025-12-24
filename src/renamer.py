@@ -109,7 +109,7 @@ class AutoRenamer:
             new_filename = None
             
             if guess.get('type') == 'episode' or metadata.get('kind') in ['tv series', 'tv mini series', 'episode']:
-                # TV Show format: Show Name SxxExx
+                # TV Show format: Show Name - SxxExx
                 season = guess.get('season')
                 episode = guess.get('episode')
                 
@@ -118,9 +118,14 @@ class AutoRenamer:
                     if isinstance(episode, list): episode = episode[0]
                     s_str = f"S{season:02d}"
                     e_str = f"E{episode:02d}"
-                    new_filename = f"{title} {s_str}{e_str}{ext}"
+                    # User Request: "Show Name - SXXEXX"
+                    new_filename = f"{title} - {s_str}{e_str}{ext}"
+                    if new_filename not in proposed_names:
+                        proposed_names.append(new_filename)
                 else:
                     new_filename = f"{title}{ext}"
+                    if new_filename not in proposed_names:
+                        proposed_names.append(new_filename)
             else:
                 # Movie format
                 year = metadata.get('year')
@@ -128,11 +133,50 @@ class AutoRenamer:
                     new_filename = f"{title} ({year}){ext}"
                 else:
                     new_filename = f"{title}{ext}"
-            
-            if new_filename and new_filename not in proposed_names:
-                proposed_names.append(new_filename)
+                
+                if new_filename and new_filename not in proposed_names:
+                    proposed_names.append(new_filename)
                 
         return proposed_names
+
+    def generate_name_from_guess(self, guess, extension):
+        """
+        Attempts to generate a clean filename purely from the guessit result.
+        Returns a string or None if critical info is missing.
+        """
+        if not guess or 'title' not in guess:
+            return None
+            
+        title = guess['title']
+        # guessit usually returns title as a clean string ("Adventure Time Fionna Cake").
+        # Should we apply standard casing? Title Case is safer.
+        # title = title.title() # Optional, users might prefer original capitalization if guessit preserves it.
+        
+        # Determine type
+        media_type = guess.get('type')
+        
+        if media_type == 'episode':
+            season = guess.get('season')
+            episode = guess.get('episode')
+            
+            if season is not None and episode is not None:
+                if isinstance(season, list): season = season[0]
+                if isinstance(episode, list): episode = episode[0]
+                
+                s_str = f"S{season:02d}"
+                e_str = f"E{episode:02d}"
+                return f"{title} - {s_str}{e_str}{extension}"
+                
+        elif media_type == 'movie':
+            year = guess.get('year')
+            if year:
+                return f"{title} ({year}){extension}"
+            else:
+                 # For movies without year, we might accept just title, but it's risky.
+                 # Let's verify we at least have a title.
+                 return f"{title}{extension}"
+                 
+        return None
 
     def rename_file(self, old_path, new_path):
         """Renames the file."""
@@ -143,64 +187,249 @@ class AutoRenamer:
             print(f"Error renaming {old_path} to {new_path}: {e}")
             return False
 
-    def rename_folders(self, directories):
+    def organize_files(self, scanned_files, scan_root):
         """
-        Renames directories based on the files they contain.
-        Expected structures: 'Show Name/Season X' or 'Show Name - Season X'.
+        Restructures folders to ensure 'Show Name/Show Name - Season X/File' hierarchy.
+        Uses scan_root and 'Show Name' anchors to flatten recursive/messy structures.
         """
-        # Sort directories by depth (deepest first) to avoid path invalidation
-        # deeper paths have more separators
-        directories = sorted(list(set(directories)), key=lambda p: p.count(os.sep), reverse=True)
         
-        for directory in directories:
-            # We need to analyze content again or infer from previous scans?
-            # Simpler: Scan the directory properly?
-            # Actually, we can just guessit on the directory name itself or look at children.
+        stats = {"folders_created": 0, "folders_renamed": 0, "files_moved": 0, "folders_moved": 0}
+        
+        # Set of source directories we have moved files FROM, to clean up later
+        cleanup_candidates = set()
+
+        for item in scanned_files:
+            original, new_name, current_path, status, _ = item
             
-            # Let's inspect the folder name itself
-            dirname = os.path.basename(directory)
-            guess = guessit(dirname)
+            valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)"]
+            if status not in valid_statuses or not current_path or not os.path.exists(current_path):
+                continue
+                
+            filename = os.path.basename(current_path)
+            # Safe regex for cleaned files
+            match = re.search(r"^(.*?) - S(\d+)E\d+", filename)
+            if not match:
+                continue
             
-            # Strategies:
-            # 1. Season Folder: "Season 1", "S1", "Show - Season 1" -> "Season 01"
-            # 2. Show Folder: "Show Name" -> "Show Name (Year)" (Maybe too risky? User said 'update folder names too')
+            raw_show_name = match.group(1)
+            season_num = int(match.group(2))
             
-            # Let's focus on Season folders first as requested
-            if guess.get('type') == 'episode' or 'season' in guess:
-                 # It thinks it's an episode/season related structure
-                 season = guess.get('season')
-                 
-                 if season is not None:
-                     if isinstance(season, list): season = season[0]
-                     
-                     # Check if it has a show title in the folder name
-                     # If it has a title + season, user might prefer "Season XX" inside a Show folder
-                     # OR "Show name - Season XX" if it's a flat structure.
-                     
-                     # Let's try to normalize to "Season XX" IF the parent folder seems to be the Show Name.
-                     # But we don't know if the parent is the show name.
-                     
-                     # Heuristic: 
-                     # If folder name is just "Season N" or "S1", rename to "Season 0N".
-                     # If folder name is "Show - Season N", maybe rename to "Season 0N" AND move to "Show" folder? 
-                     # Moving files is risky. Let's just rename inplace.
-                     
-                     new_dirname = None
-                     
-                     # Case: "Season 1" -> "Season 01"
-                     if 'season' in dirname.lower() and 'packet' not in dirname.lower(): # simple check
-                         new_dirname = f"Season {season:02d}"
+            # Enforce Title Case for Folders (Uniformity)
+            # Use string.title() or similar. 
+            # Note: This might mismatch the filename if the file is lowercase "halo".
+            # But the user asked to rename the *folders* for uniformity.
+            show_name = raw_show_name.strip()
+            # Heuristic: If it starts with lower, title it. 
+            # Simple .title() handles "halo" -> "Halo".
+            show_name = show_name.title()
+            
+            target_season_dir_name = f"{show_name} - Season {season_num}"
+            target_show_dir_name = show_name
+            
+            # --- Determine Base/Anchor (Strict Flattening Logic) ---
+            # We want to enforce that the Show Folder is either the Root itself (if selected)
+            # OR a direct child of the Root. 
+            # This bypasses all deep/recursive nesting.
+
+            # Normalize paths
+            try:
+                abs_current = os.path.abspath(current_path)
+                abs_root = os.path.abspath(scan_root)
+            except Exception:
+                continue
+
+            root_name = os.path.basename(abs_root)
+            
+            final_show_dir = None
+            
+            # Case 1: The Root IS the Show Folder (e.g. user selected "Halo")
+            if root_name.lower() == show_name.lower():
+                # We can't easily rename the root scanning directory itself safely.
+                # Assume it is acceptable or user must rename root manually.
+                final_show_dir = abs_root
+            else:
+                # Case 2: The Show Folder should be a child of Root (e.g. user selected "TV Shows")
+                found_match = None
+                if os.path.exists(abs_root):
+                    try:
+                        for child in os.listdir(abs_root):
+                            if child.lower() == show_name.lower():
+                                child_path = os.path.join(abs_root, child)
+                                if os.path.isdir(child_path):
+                                    # Found it! Check casing.
+                                    if child != show_name:
+                                        # Wrong casing (e.g. "halo"). Rename.
+                                        print(f"DEBUG: Fixing case for Show Folder: {child} -> {show_name}")
+                                        temp_path = os.path.join(abs_root, f"{child}_temp_rename")
+                                        final_path = os.path.join(abs_root, show_name)
+                                        try:
+                                            os.rename(child_path, temp_path)
+                                            os.rename(temp_path, final_path)
+                                            child_path = final_path
+                                            stats["folders_renamed"] += 1
+                                        except OSError as e:
+                                            print(f"Error capitalizing show folder: {e}")
+                                            # Fallback to existing
+                                    
+                                    found_match = child_path
+                                    break
+                    except OSError:
+                        pass
+                
+                if found_match:
+                    final_show_dir = found_match
+                else:
+                    final_show_dir = os.path.join(abs_root, show_name)
+
+            # --- Determine Season Dir & Fix Case ---
+            # We must check if season dir exists inside final_show_dir with wrong case
+            final_season_dir = os.path.join(final_show_dir, target_season_dir_name)
+            
+            if os.path.exists(final_show_dir):
+                try:
+                    for child in os.listdir(final_show_dir):
+                        if child.lower() == target_season_dir_name.lower():
+                            child_path = os.path.join(final_show_dir, child)
+                            if os.path.isdir(child_path):
+                                if child != target_season_dir_name:
+                                    print(f"DEBUG: Fixing case for Season Folder: {child} -> {target_season_dir_name}")
+                                    temp_path = os.path.join(final_show_dir, f"{child}_temp_rename")
+                                    final_path = os.path.join(final_show_dir, target_season_dir_name)
+                                    try:
+                                        os.rename(child_path, temp_path)
+                                        os.rename(temp_path, final_path)
+                                        stats["folders_renamed"] += 1
+                                    except OSError as e:
+                                         print(f"Error capitalizing season folder: {e}")
+                                break
+                except OSError: pass
+            
+            final_file_path = os.path.join(final_season_dir, filename)
+            
+            # --- Move File ---
+            if abs_current != final_file_path:
+                print(f"DEBUG: Organizing {filename} -> {final_season_dir}")
+                
+                if not os.path.exists(final_show_dir):
+                    try:
+                         os.makedirs(final_show_dir)
+                         stats["folders_created"] += 1
+                    except OSError: pass
+
+                if not os.path.exists(final_season_dir):
+                    try:
+                        os.makedirs(final_season_dir)
+                        stats["folders_created"] += 1
+                    except OSError: pass
+                
+                # Check collision
+                if os.path.exists(final_file_path):
+                    # Collision. If src != dst, we have a duplicate?
+                    # Or we already moved it? (Logic above check abs_current != final_file_path)
+                    print(f"DEBUG: Target file exists {final_file_path}, skipping move.")
+                else:
+                    try:
+                        os.rename(abs_current, final_file_path)
+                        stats["files_moved"] += 1
+                        # Update current_path reference if we were tracking it (scanned_files is distinct)
+                        cleanup_candidates.add(os.path.dirname(abs_current))
+                    except OSError as e:
+                        print(f"Error moving file: {e}")
+            else:
+                # Already in correct place
+                pass
+
+        # --- Cleanup Empty Dirs ---
+        # Sort by depth (deepest first) to delete leaf nodes first
+        sorted_candidates = sorted(list(cleanup_candidates), key=lambda p: len(p), reverse=True)
+        
+        for d in sorted_candidates:
+            # Check if empty
+            try:
+                if not os.listdir(d):
+                    print(f"DEBUG: Removing empty folder {d}")
+                    os.rmdir(d)
+                else:
+                    # check if it contains only empty season folders we just emptied?
+                    # The recursion above handles depth, but if we have multiple levels...
+                    # simple rmdir only works if empty.
+                    pass
+            except OSError:
+                pass
+                
+        return stats
+
+    def infer_missing_titles(self, scanned_files):
+        """
+        Post-process pass to fill in 'Unknown' files using siblings in the same folder.
+        scanned_files format: [(original, new_name, full_new_path, status, options), ...]
+        Returns updated scanned_files list.
+        """
+        from collections import Counter
+        
+        # 1. Group by directory
+        dir_groups = {}
+        for idx, item in enumerate(scanned_files):
+            original = item[0]
+            dirname = os.path.dirname(original)
+            if dirname not in dir_groups:
+                dir_groups[dirname] = []
+            dir_groups[dirname].append(idx)
+            
+        updated_files = list(scanned_files)
+        
+        for dirname, indices in dir_groups.items():
+            # Gather successful matches in this folder
+            valid_titles = []
+            
+            for idx in indices:
+                # new_name is item[1]
+                new_name = updated_files[idx][1]
+                if new_name and new_name != "Unknown":
+                    # Extract title from "Title - SxxExx.ext"
+                    # Regex is safest
+                    match = re.search(r"^(.*?) - S\d+E\d+", new_name)
+                    if match:
+                        valid_titles.append(match.group(1))
+            
+            if not valid_titles:
+                continue
+                
+            # Find consensus title
+            common_title = Counter(valid_titles).most_common(1)[0][0]
+            print(f"DEBUG: Consensus title for '{dirname}' is '{common_title}'")
+            
+            # Apply to failures
+            for idx in indices:
+                original, new_name, full_path, status, options = updated_files[idx]
+                
+                if new_name == "Unknown" or new_name is None:
+                    # Parse original to get S/E
+                    guess = self.parse_filename(original)
+                    season = guess.get('season')
+                    episode = guess.get('episode')
                     
-                     # If valid rename and different
-                     if new_dirname and new_dirname != dirname:
-                         parent = os.path.dirname(directory)
-                         new_path = os.path.join(parent, new_dirname)
+                    if season and episode:
+                         if isinstance(season, list): season = season[0]
+                         if isinstance(episode, list): episode = episode[0]
                          
-                         # Check collision
-                         if not os.path.exists(new_path):
-                             print(f"Renaming folder: {directory} -> {new_path}")
-                             try:
-                                 os.rename(directory, new_path)
-                             except Exception as e:
-                                 print(f"Failed to rename folder {directory}: {e}")
+                         _, ext = os.path.splitext(original)
+                         
+                         # Construct new name
+                         s_str = f"S{season:02d}"
+                         e_str = f"E{episode:02d}"
+                         inferred_name = f"{common_title} - {s_str}{e_str}{ext}"
+                         
+                         print(f"DEBUG: Inferring name for {os.path.basename(original)} -> {inferred_name}")
+                         
+                         dirname = os.path.dirname(original)
+                         new_full_path = os.path.join(dirname, inferred_name)
+                         
+                         # Update tuple
+                         # We add the inferred name as an option (and selection)
+                         # options list was empty for unknown
+                         new_options = [inferred_name]
+                         updated_files[idx] = (original, inferred_name, new_full_path, "Ready (Inferred)", new_options)
+                         
+        return updated_files
 
