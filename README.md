@@ -4,23 +4,31 @@
 
 AutoTitlePro is a powerful Windows utility that automatically identifies, renames, and organizes your video files (Movies & TV Shows) using a combination of local heuristics, context inference, and IMDb metadata.
 
-**Version**: v2025.12.24.13
+**Version**: v2025.12.24.16
 
 ## 🚀 Key Features
 
-### 🧠 Smart Identificaton & Comparison
+### 🧠 Smart Identificaton & Hierarchy
 *   **Massive Batch Processing**: Designed to handle `TV Show` root folders with hundreds of shows. It caches directory structures to ensure lightning-fast processing without repeated disk scans.
-*   **Context Awareness**: "Learns" the show title from one successful file in a folder and instantly applies it to all siblings (e.g. `01.mkv` -> `Lost s01e01` -> all other files know they are `Lost`).
-*   **Recursive Parent Standardization**: If a file is named `Video.mp4` inside `season 1` inside `halo`, the app intelligently looks UP to the **Parent Folder**, identifies it as `Halo`, and renames the folder hierarchy to match.
+*   **Contextual Title Inference (Rich Titles)**: Automatically detects "Rich Titles" from folder names (e.g. `Game of Thrones/GoT S01E01` -> `Game of Thrones`). It even cleans up suffixes like " - Season 1" to get the pure show title.
+*   **Recursive Parent Standardization**: Identifies parent folder naming issues (`halo/season 1` -> `Halo/Season 1`) and standardizes the entire tree.
+
+### 🎨 Visuals & Usability
+*   **Split Result View**: A clean, two-column layout ("Original" vs "New") with valid row separators makes verification effortless.
+*   **Smart Filter**: Automatically hides files that are already named correctly, so you only see what *actually* needs renaming.
+*   **Status Indicators**: Always know if "older organization" is active with the header status ("Folder Sort: ON").
+
+### ⚙️ Ultimate Customization
+*   **Custom Rename Formats**: Define exactly how you want your files named using tokens like `{Title}`, `{season}`, `{year}` (e.g. `Show - S01E01` or `Show 1x01`).
+*   **Custom Folder Formats**: Control your season folder structure (e.g. `Season 1`, `Series 1`, `S1`).
 
 ### 📂 Deep Organization & Hygiene
-*   **Strict Flattening**: Enforces a clean `Show Name` > `Show Name - Season X` > `Files` hierarchy. It detects and fixes recursive/nested folders (e.g. `Halo/halo - season 2/Halo...`) by pulling files up to the top level.
-*   **Universal Standardization**: Enforces **Title Case** on EVERY filename and folder (e.g. `breaking bad` -> `Breaking Bad`, `season 1` -> `Season 1`) for a perfectly uniform library.
-*   **Companion File Support**: Automatically detects, renames, and moves subtitles (`.srt`, `.vtt`), artwork (`.jpg`, `.png`), and metadata (`.nfo`) files along with your videos. No orphan left behind!
+*   **Strict Flattening**: Enforces a clean `Show Name` > `Show Name - Season X` > `Files` hierarchy. It detects and fixes recursive/nested folders by pulling files up to the correct level.
+*   **Universal Standardization**: Enforces **Title Case** on EVERY filename and folder.
+*   **Companion File Support**: Automatically renames and moves subtitles (`.srt`, `.vtt`), artwork/posters (`.jpg`), and metadata (`.nfo`) along with video files.
 
 ### 🛡️ Safety & Control
 *   **Folder Preview Tab**: A dedicated tab that shows you **Folder Renames** (Yellow) and **Folder Creations** (Green) *before* you click process.
-*   **Settings Dashboard**: Fine-tune your experience. Toggle **Rename Files**, **Organize Folders**, **Title Case**, or **Dark Mode**.
 *   **Review First**: "Unknown" or low-confidence matches are automatically sorted to the top for review.
 *   **Non-Destructive**: Files marked "Unknown" are skipped by default.
 

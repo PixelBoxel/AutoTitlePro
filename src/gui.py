@@ -31,13 +31,18 @@ class AutoTitleApp(customtkinter.CTk):
         # Settings Button
         self.settings_button = customtkinter.CTkButton(self.header_frame, text="⚙ Settings", width=100, command=self.open_settings)
         self.settings_button.pack(side="right", padx=10)
+        
+        # Organization Status Indicator
+        self.org_indicator = customtkinter.CTkLabel(self.header_frame, text="", font=customtkinter.CTkFont(size=12, weight="bold"))
+        self.org_indicator.pack(side="right", padx=20)
 
         # Settings Storage (Default values)
         self.settings = {
             "organize": True,
             "title_case": True,
             "dark_mode": True,
-            "rename_files": True 
+            "rename_files": True,
+            "rename_format": "{Title} - S{season}E{episode}" # Default
         }
 
         # Content Area - Tab View
@@ -68,11 +73,19 @@ class AutoTitleApp(customtkinter.CTk):
         
         self.progress_bar = customtkinter.CTkProgressBar(self.footer_frame)
         self.progress_bar.set(0)
+        
+        self.update_status_indicators()
+
+    def update_status_indicators(self):
+        if self.settings.get("organize"):
+            self.org_indicator.configure(text="Folder Sort: ON", text_color="#55ff55") # Green
+        else:
+            self.org_indicator.configure(text="Folder Sort: OFF", text_color="#ff5555") # Red
 
     def open_settings(self):
         self.settings_window = customtkinter.CTkToplevel(self)
         self.settings_window.title("Settings")
-        self.settings_window.geometry("400x300")
+        self.settings_window.geometry("400x500") # Increased height
         
         # Make modal
         self.settings_window.grab_set()
@@ -89,24 +102,54 @@ class AutoTitleApp(customtkinter.CTk):
         self.sw_dark = customtkinter.CTkSwitch(self.settings_window, text="Dark Mode", command=self.toggle_theme)
         if self.settings["dark_mode"]: self.sw_dark.select()
         self.sw_dark.pack(pady=10, data=None) # simple pack
-        
-        # 2. Rename Files
-        self.sw_rename = customtkinter.CTkSwitch(self.settings_window, text="Rename Files", command=lambda: self.update_setting("rename_files", self.sw_rename.get()))
-        if self.settings["rename_files"]: self.sw_rename.select()
-        self.sw_rename.pack(pady=10)
-        
-        # 3. Organize (Move) Files
-        self.sw_org = customtkinter.CTkSwitch(self.settings_window, text="Organize into Folders", command=lambda: self.update_setting("organize", self.sw_org.get()))
-        if self.settings["organize"]: self.sw_org.select()
-        self.sw_org.pack(pady=10)
-        
-        # 4. Title Case
+
+        # 2. Title Case (Moved per request)
         self.sw_case = customtkinter.CTkSwitch(self.settings_window, text="Enforce Title Case", command=lambda: self.update_setting("title_case", self.sw_case.get()))
         if self.settings["title_case"]: self.sw_case.select()
         self.sw_case.pack(pady=10)
         
+        # 3. Rename Files
+        self.sw_rename = customtkinter.CTkSwitch(self.settings_window, text="Rename Files", command=lambda: self.update_setting("rename_files", self.sw_rename.get()))
+        if self.settings["rename_files"]: self.sw_rename.select()
+        self.sw_rename.pack(pady=10)
+        
+        # 4. Rename Format
+        fmt_frame = customtkinter.CTkFrame(self.settings_window, fg_color="transparent")
+        fmt_frame.pack(pady=10, padx=20, fill="x")
+        
+        customtkinter.CTkLabel(fmt_frame, text="Rename Format:", anchor="w").pack(fill="x")
+        self.entry_fmt = customtkinter.CTkEntry(fmt_frame)
+        self.entry_fmt.insert(0, self.settings.get("rename_format", "{Title} - S{season}E{episode}"))
+        self.entry_fmt.pack(fill="x", pady=5)
+        self.entry_fmt.bind("<KeyRelease>", lambda e: self.update_setting("rename_format", self.entry_fmt.get()))
+        
+        customtkinter.CTkLabel(fmt_frame, text="Tokens: {Title} {season} {episode} {year}", text_color="gray", font=("Arial", 10)).pack(anchor="w")
+
+        # 5. Organize (Move) Files
+        self.sw_org = customtkinter.CTkSwitch(self.settings_window, text="Organize into Folders", command=lambda: self.update_setting("organize", self.sw_org.get()))
+        if self.settings["organize"]: self.sw_org.select()
+        self.sw_org.pack(pady=10)
+        
+        # 6. Folder Format
+        ffmt_frame = customtkinter.CTkFrame(self.settings_window, fg_color="transparent")
+        ffmt_frame.pack(pady=10, padx=20, fill="x")
+        
+        customtkinter.CTkLabel(ffmt_frame, text="Season Folder Format:", anchor="w").pack(fill="x")
+        self.entry_ffmt = customtkinter.CTkEntry(ffmt_frame)
+        self.entry_ffmt.insert(0, self.settings.get("folder_format", "{Title} - Season {season}"))
+        self.entry_ffmt.pack(fill="x", pady=5)
+        self.entry_ffmt.bind("<KeyRelease>", lambda e: self.update_setting("folder_format", self.entry_ffmt.get()))
+        
+        customtkinter.CTkLabel(ffmt_frame, text="Tokens: {Title} {season}", text_color="gray", font=("Arial", 10)).pack(anchor="w")
+        
     def update_setting(self, key, value):
-        self.settings[key] = bool(value)
+        if key in ["rename_format", "folder_format"]:
+             self.settings[key] = value # String
+        else:
+             self.settings[key] = bool(value)
+             
+        # Refresh Indicators
+        self.update_status_indicators()
         
     def toggle_theme(self):
         val = self.sw_dark.get()
@@ -153,6 +196,9 @@ class AutoTitleApp(customtkinter.CTk):
         # Cache for folder -> Show Title to speed up parsing
         known_dirs = {}
         
+        # Get Format Setting
+        fmt = self.settings.get("rename_format")
+        
         for i, file_path in enumerate(files):
             # Update UI for progress
             filename = os.path.basename(file_path)
@@ -162,17 +208,31 @@ class AutoTitleApp(customtkinter.CTk):
             guess = self.renamer.parse_filename(file_path)
             _, ext = os.path.splitext(file_path)
             
+            # --- CONTEXTUAL TITLE INFERENCE (NEW) ---
+            # Try to get a better title from parent folders logic if filename short/generic
+            # Rule: If folder title is found and is longer/different than filename title, use it.
+            context_title = self.renamer.extract_context_title(file_path)
+            if context_title:
+                filename_title = guess.get('title', '')
+                # Heuristic: If context title is significantly different or filename title is very short (e.g. "GoT" vs "Game of Thrones")
+                # Or just always trust folder context if it exists and looks like a title?
+                # Let's trust it if it's not None.
+                # However, ensure we don't overwrite if filename had something specific like "Game of Thrones (2011)"
+                # But guessing usually returns raw string.
+                print(f"DEBUG: Context title found: '{context_title}' (overriding '{filename_title}')")
+                guess['title'] = context_title
+            
             # 1. FAST PATH: Local Parse
-            local_name = self.renamer.generate_name_from_guess(guess, ext)
+            local_name = self.renamer.generate_name_from_guess(guess, ext, format_string=fmt)
             
             if local_name:
                 dirname = os.path.dirname(file_path)
                 full_new_path = os.path.join(dirname, local_name)
                 # Parse out the title to cache it
-                # local_name is "Show - SxxExx.ext"
-                match = re.search(r"^(.*?) - S\d+E\d+", local_name)
-                if match:
-                    known_dirs[dirname] = match.group(1)
+                # We need to robustly extract title regardless of format?
+                # Actually, extracting from `guess` is safer.
+                if guess.get('title'):
+                    known_dirs[dirname] = guess['title'].strip().title()
                 
                 print(f"DEBUG: Local parse success: {local_name}")
                 
@@ -193,9 +253,16 @@ class AutoTitleApp(customtkinter.CTk):
                     if isinstance(season, list): season = season[0]
                     if isinstance(episode, list): episode = episode[0]
                     
-                    s_str = f"S{season:02d}"
-                    e_str = f"E{episode:02d}"
-                    inferred_name = f"{cached_title} - {s_str}{e_str}{ext}"
+                    # Apply Format
+                    if fmt:
+                        data = {'title': cached_title, 'season': season, 'episode': episode, 'year': guess.get('year')}
+                        stem = self.renamer.apply_format(fmt, data)
+                        inferred_name = f"{stem}{ext}"
+                    else:
+                        s_str = f"S{season:02d}"
+                        e_str = f"E{episode:02d}"
+                        inferred_name = f"{cached_title} - {s_str}{e_str}{ext}"
+                        
                     full_new_path = os.path.join(dirname, inferred_name)
                     
                     print(f"DEBUG: Cache hit for {dirname}: {inferred_name}")
@@ -208,7 +275,7 @@ class AutoTitleApp(customtkinter.CTk):
                 # 3. SLOW PATH: Fetch online metadata
                 print(f"DEBUG: Local parse insufficient for {filename}, fetching online...")
                 metadata_list = self.renamer.fetch_metadata(guess, file_path)
-                proposed_names = self.renamer.propose_rename(file_path, guess, metadata_list)
+                proposed_names = self.renamer.propose_rename(file_path, guess, metadata_list, format_string=fmt)
                 
                 if proposed_names:
                     # Default to first
@@ -216,10 +283,9 @@ class AutoTitleApp(customtkinter.CTk):
                     dirname = os.path.dirname(file_path)
                     full_new_path = os.path.join(dirname, best_name)
                     
-                    # Cache the title from the online result
-                    match = re.search(r"^(.*?) - S\d+E\d+", best_name)
-                    if match:
-                        known_dirs[dirname] = match.group(1)
+                    # Cache the title
+                    if guess.get('title'):
+                        known_dirs[dirname] = guess['title'].strip().title()
                         
                     results.append((file_path, best_name, full_new_path, "Ready (Online)", proposed_names))
                 else:
@@ -253,48 +319,79 @@ class AutoTitleApp(customtkinter.CTk):
         self.run_button.configure(state="normal")
         self.comboboxes = {} # Map index to combobox widget
         
-        # Add Header
+        # 1. Fixed Header (Grid)
         header_frame = customtkinter.CTkFrame(self.tab_files, fg_color="transparent")
         header_frame.pack(fill="x", padx=10, pady=5)
-        customtkinter.CTkLabel(header_frame, text="Current Filename", font=customtkinter.CTkFont(size=12, weight="bold"), anchor="w", width=300).pack(side="left", padx=10)
-        customtkinter.CTkLabel(header_frame, text="New Filename", font=customtkinter.CTkFont(size=12, weight="bold"), anchor="w", width=300).pack(side="left", padx=10)
+        header_frame.grid_columnconfigure(0, weight=1) # Orig
+        header_frame.grid_columnconfigure(1, weight=0) # Arrow
+        header_frame.grid_columnconfigure(2, weight=1) # New
+        
+        customtkinter.CTkLabel(header_frame, text="Original Names", font=customtkinter.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, sticky="ew")
+        customtkinter.CTkLabel(header_frame, text="", width=20).grid(row=0, column=1) # spacer
+        customtkinter.CTkLabel(header_frame, text="New Names", font=customtkinter.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=2, padx=10, sticky="ew")
 
+        # 2. Scrollable Content Area
+        scroll_frame = customtkinter.CTkScrollableFrame(self.tab_files, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        scroll_frame.grid_columnconfigure(0, weight=1)
+        scroll_frame.grid_columnconfigure(1, weight=0)
+        scroll_frame.grid_columnconfigure(2, weight=1)
+
+        visible_row_count = 0
         for i, (original, new_name, _, status, options) in enumerate(self.scanned_files):
-            row_frame = customtkinter.CTkFrame(self.tab_files)
-            row_frame.pack(fill="x", padx=10, pady=2)
+            # FILTER: Hide if new_name matches original exactly (Quality of Life)
+            # Unless status has error? No, if error new_name likely different or None.
+            orig_name = os.path.basename(original)
+            if new_name == orig_name and "Unknown" not in status:
+                continue
+                
+            row_idx = visible_row_count * 2
+            visible_row_count += 1
             
             # Original Name
-            orig_name = os.path.basename(original)
+            # orig_name already calc above
             
             # Color coding
-            color = "white"
-            # If status contains "Unknown" or "Skipped", use red
+            color = "white" # System default often adapts, but explicit white in dark mode is safe or let None do work.  
+            # Actually, let's use standard text colors but highlighting is good.
+            text_color_val = "text_color" # Special token? No, just use None for default
+            
             if "Unknown" in status or "Skipped" in status:
                 color = "#ff5555" # Red
                 if not new_name: new_name = "Unknown"
             elif "Cached" in status: 
                 color = "#55ff55" # Green
             
-            lbl_orig = customtkinter.CTkLabel(row_frame, text=orig_name, width=400, anchor="w", text_color=color)
-            lbl_orig.pack(side="left", padx=10)
+            # Use color only if set
+            lbl_orig = customtkinter.CTkLabel(scroll_frame, text=orig_name, anchor="w", text_color=color if color != "white" else None)
+            lbl_orig.grid(row=row_idx, column=0, padx=10, pady=5, sticky="ew")
             
-            customtkinter.CTkLabel(row_frame, text="➜").pack(side="left", padx=5)
+            # Arrow
+            customtkinter.CTkLabel(scroll_frame, text="➜", text_color="gray").grid(row=row_idx, column=1, padx=5)
             
-            # Options
+            # New Name (Combobox)
             if not options: options = ["Unknown"]
             
             # Ensure new_name is in options
             if new_name and new_name not in options:
                 options.insert(0, new_name)
                 
-            combo = customtkinter.CTkComboBox(row_frame, values=options, width=400)
+            combo = customtkinter.CTkComboBox(scroll_frame, values=options)
             if new_name:
                 combo.set(new_name)
             else:
                 combo.set("Unknown")
                 
-            combo.pack(side="left", padx=10)
+            combo.grid(row=row_idx, column=2, padx=10, pady=5, sticky="ew")
             self.comboboxes[i] = combo
+            
+            # Separator Line
+            sep = customtkinter.CTkFrame(scroll_frame, height=2, fg_color=("gray85", "gray25"))
+            sep.grid(row=row_idx+1, column=0, columnspan=3, sticky="ew", padx=10, pady=0)
+            
+        if visible_row_count == 0:
+             customtkinter.CTkLabel(scroll_frame, text="All files matched their expected names! No changes needed.").pack(pady=20)
             
         # Update Folders Tab
         self.refresh_folder_preview()
@@ -352,17 +449,20 @@ class AutoTitleApp(customtkinter.CTk):
     def start_renaming(self):
         # Update scanned_files with current selections from comboboxes
         updated_files = []
-        for i, (original, _, _, status, options) in enumerate(self.scanned_files):
+        for i, (original, default_new_name, _, status, options) in enumerate(self.scanned_files):
             combo = self.comboboxes.get(i)
             if combo:
+                # User visible row
                 selected_name = combo.get()
-                if selected_name and selected_name != "Unknown":
-                    dirname = os.path.dirname(original)
-                    full_new_path = os.path.join(dirname, selected_name)
-                    # FIX: Append 5th element (options) to satisfy unpack in organize_files
-                    updated_files.append((original, selected_name, full_new_path, "Ready", options))
-                else:
-                    updated_files.append((original, None, None, "Skipped", []))
+            else:
+                # Hidden row (filtered out), use default
+                selected_name = default_new_name
+                
+            if selected_name and selected_name != "Unknown":
+                dirname = os.path.dirname(original)
+                full_new_path = os.path.join(dirname, selected_name)
+                # FIX: Append 5th element (options) to satisfy unpack in organize_files
+                updated_files.append((original, selected_name, full_new_path, "Ready", options))
             else:
                 updated_files.append((original, None, None, "Skipped", []))
         

@@ -8,7 +8,7 @@ import datetime
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
 # Static version for release tracking
-__version__ = "v2025.12.24.13"
+__version__ = "v2025.12.24.16"
 
 class AutoRenamer:
     def __init__(self):
@@ -107,7 +107,7 @@ class AutoRenamer:
             print(f"Error fetching metadata for {title}: {e}")
             return []
 
-    def propose_rename(self, file_path, guess, metadata_list):
+    def propose_rename(self, file_path, guess, metadata_list, format_string=None):
         """Generates a list of new filenames based on metadata candidates."""
         if not metadata_list or not guess:
             return []
@@ -129,17 +129,28 @@ class AutoRenamer:
             new_filename = None
             
             if guess.get('type') == 'episode' or metadata.get('kind') in ['tv series', 'tv mini series', 'episode']:
-                # TV Show format: Show Name - SxxExx
+                # TV Show format
                 season = guess.get('season')
                 episode = guess.get('episode')
                 
                 if season is not None and episode is not None:
                     if isinstance(season, list): season = season[0]
                     if isinstance(episode, list): episode = episode[0]
-                    s_str = f"S{season:02d}"
-                    e_str = f"E{episode:02d}"
-                    # User Request: "Show Name - SXXEXX"
-                    new_filename = f"{title} - {s_str}{e_str}{ext}"
+                    
+                    if format_string:
+                        data = {
+                            'title': title,
+                            'season': season,
+                            'episode': episode,
+                            'year': metadata.get('year')
+                        }
+                        stem = self.apply_format(format_string, data)
+                        new_filename = f"{stem}{ext}"
+                    else:
+                        s_str = f"S{season:02d}"
+                        e_str = f"E{episode:02d}"
+                        new_filename = f"{title} - {s_str}{e_str}{ext}"
+                        
                     if new_filename not in proposed_names:
                         proposed_names.append(new_filename)
                 else:
@@ -156,10 +167,92 @@ class AutoRenamer:
                 
                 if new_filename and new_filename not in proposed_names:
                     proposed_names.append(new_filename)
-                
+                        
         return proposed_names
 
-    def generate_name_from_guess(self, guess, extension):
+    def extract_context_title(self, file_path):
+        """
+        Walks up the directory tree to find a 'Rich Title' from folder names.
+        Skips generic folders like 'Season X', 'Specials', 'Subs'.
+        Returns the title string if found, or None.
+        """
+        try:
+            ignore_pattern = re.compile(r"^(season ?\d+|specials|featurettes|subs|subtitles|bonus|cd\d+)$", re.IGNORECASE)
+            
+            # Start from parent
+            parent = os.path.dirname(file_path)
+            
+            # Walk up at most 2 levels
+            for _ in range(2):
+                dirname = os.path.basename(parent)
+                if not dirname or len(dirname) < 2: # Root or empty
+                    break
+                    
+                if not ignore_pattern.match(dirname):
+                    # Found a potential candidate!
+                    # Clean it: Remove trailing " - Season X" or " Season X"
+                    title = dirname.strip()
+                    title = re.sub(r"[ -]*Season ?\d+$", "", title, flags=re.IGNORECASE)
+                    return title.strip()
+                    
+                # Move up
+                parent = os.path.dirname(parent)
+        except Exception:
+            pass
+        return None
+
+    def apply_format(self, template, data):
+        """
+        Applies data to the format template.
+        Supported tokens: {Title}, {title}, {season}, {episode}, {year}.
+        Auto-handles S/E padding.
+        """
+        # Prepare data dict
+        fmt_data = {}
+        
+        # Title
+        t = data.get('title', '')
+        fmt_data['Title'] = t.strip().title()
+        fmt_data['title'] = t.strip() # As parsed
+        
+        # Season/Episode (Ensure 02d)
+        s = data.get('season')
+        e = data.get('episode')
+        
+        if s is not None:
+            try: fmt_data['season'] = f"{int(s):02d}"
+            except: fmt_data['season'] = str(s)
+        else: fmt_data['season'] = ""
+            
+        if e is not None:
+             try: fmt_data['episode'] = f"{int(e):02d}"
+             except: fmt_data['episode'] = str(e)
+        else: fmt_data['episode'] = ""
+        
+        # Year
+        y = data.get('year')
+        fmt_data['year'] = str(y) if y else ""
+
+        # Safe formatting
+        # We need to replace only known keys.
+        # Python's format() fails if missing keys.
+        # So we do a manual replacement or SafeSub.
+        # Manual replace is safer for limited set.
+        
+        result = template
+        for key, val in fmt_data.items():
+            result = result.replace(f"{{{key}}}", val)
+            
+        # Clean double spaces or weird chars from template artifacts?
+        # nah, trust user template.
+        
+        # Sanitize filename characters at end?
+        # Just ensure valid chars.
+        result = "".join([c for c in result if c not in r'<>:"/\|?*'])
+        
+        return result
+
+    def generate_name_from_guess(self, guess, extension, format_string=None):
         """
         Attempts to generate a clean filename purely from the guessit result.
         Returns a string or None if critical info is missing.
@@ -182,9 +275,21 @@ class AutoRenamer:
                 if isinstance(season, list): season = season[0]
                 if isinstance(episode, list): episode = episode[0]
                 
-                s_str = f"S{season:02d}"
-                e_str = f"E{episode:02d}"
-                return f"{title} - {s_str}{e_str}{extension}"
+                # Use format string if provided
+                if format_string:
+                    data = {
+                        'title': title,
+                        'season': season,
+                        'episode': episode,
+                        'year': guess.get('year'),
+                    }
+                    stem = self.apply_format(format_string, data)
+                    return f"{stem}{extension}"
+                else:
+                    # Default
+                    s_str = f"S{season:02d}"
+                    e_str = f"E{episode:02d}"
+                    return f"{title} - {s_str}{e_str}{extension}"
                 
         elif media_type == 'movie':
             year = guess.get('year')
@@ -437,6 +542,18 @@ class AutoRenamer:
                         root_children_cache[show_name.lower()] = show_name
 
             # --- Determine Season Dir & Fix Case ---
+            # Get Folder Format
+            folder_fmt = settings.get("folder_format")
+            
+            if folder_fmt:
+                 # Clean format string to avoid path injection
+                 folder_fmt = "".join([c for c in folder_fmt if c not in r':*?"<>|'])
+                 data = {'title': show_name, 'season': season_num, 'episode': 0, 'year': ''}
+                 target_season_dir_name = self.apply_format(folder_fmt, data)
+            else:
+                 # Default
+                 target_season_dir_name = f"{show_name} - Season {season_num}"
+
             # We must check if season dir exists inside final_show_dir with wrong case
             final_season_dir = os.path.join(final_show_dir, target_season_dir_name)
             
@@ -774,6 +891,15 @@ class AutoRenamer:
                             root_children_lower[show_name.lower()] = show_name
 
             # --- SEASON FOLDER LOGIC ---
+            # Get Folder Format
+            folder_fmt = settings.get("folder_format")
+            if folder_fmt:
+                 folder_fmt = "".join([c for c in folder_fmt if c not in r':*?"<>|'])
+                 data = {'title': show_name, 'season': season_num, 'episode': 0, 'year': ''}
+                 target_season_dir_name = self.apply_format(folder_fmt, data)
+            else:
+                 target_season_dir_name = f"{show_name} - Season {season_num}"
+
             final_season_dir = os.path.join(final_show_dir, target_season_dir_name)
             
             # Check for existing season folder (to rename)
