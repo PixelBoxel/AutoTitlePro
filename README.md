@@ -6,6 +6,10 @@ AutoTitlePro is a powerful Windows utility that automatically identifies, rename
 
 **Version**: v2025.12.24.11
 
+1.  **Download**: [**Download AutoTitlePro**](https://github.com/PixelBoxel/AutoTitlePro/releases/download/v2025.12.24.11/AutoTitlePro.exe)
+2.  **No Installation Required**: Just double-click the `.exe` to launch.
+    *   *Note: First launch might be slower as it extracts resources.*
+
 ## 🚀 Key Features
 
 ### 🧠 Smart Identificaton & Hierarchy
@@ -45,10 +49,6 @@ AutoTitlePro is a powerful Windows utility that automatically identifies, rename
 
 ## 📦 Installation
 
-
-1.  **Download**: [**Click here to download AutoTitlePro.exe**](https://github.com/PixelBoxel/AutoTitlePro/releases/download/v2025.12.24.11/AutoTitlePro.exe)
-2.  **No Installation Required**: Just double-click the `.exe` to launch.
-    *   *Note: First launch might be slower as it extracts resources.*
 
 ### 🛠️ Build from Source
 
