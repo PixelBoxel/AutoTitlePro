@@ -3,6 +3,7 @@ import customtkinter
 import threading
 import os
 import tkinter.messagebox
+import re
 from renamer import AutoRenamer
 
 class AutoTitleApp(customtkinter.CTk):
@@ -85,21 +86,30 @@ class AutoTitleApp(customtkinter.CTk):
         files = self.renamer.scan_directory(directory)
         results = []
         
+        # Cache for folder -> Show Title to speed up parsing
+        known_dirs = {}
+        
         for i, file_path in enumerate(files):
             # Update UI for progress
             filename = os.path.basename(file_path)
+            dirname = os.path.dirname(file_path)
             self.current_label.configure(text=f"Processing: {filename}")
             
             guess = self.renamer.parse_filename(file_path)
-            
-            # FAST PATH: Try to generate name locally first
             _, ext = os.path.splitext(file_path)
+            
+            # 1. FAST PATH: Local Parse
             local_name = self.renamer.generate_name_from_guess(guess, ext)
             
             if local_name:
                 dirname = os.path.dirname(file_path)
                 full_new_path = os.path.join(dirname, local_name)
-                # We can still add local_name as the ONLY option for now to be fast
+                # Parse out the title to cache it
+                # local_name is "Show - SxxExx.ext"
+                match = re.search(r"^(.*?) - S\d+E\d+", local_name)
+                if match:
+                    known_dirs[dirname] = match.group(1)
+                
                 print(f"DEBUG: Local parse success: {local_name}")
                 
                 # Check for perfect match
@@ -107,10 +117,33 @@ class AutoTitleApp(customtkinter.CTk):
                      results.append((file_path, local_name, full_new_path, "Ready (Organize Only)", [local_name]))
                 else:
                      results.append((file_path, local_name, full_new_path, "Ready (Local)", [local_name]))
+            
+            # 2. CACHE PATH: Use known show title from siblings
+            elif dirname in known_dirs:
+                cached_title = known_dirs[dirname]
+                # We need Season/Episode from guess
+                season = guess.get('season')
+                episode = guess.get('episode')
+                
+                if season is not None and episode is not None:
+                    if isinstance(season, list): season = season[0]
+                    if isinstance(episode, list): episode = episode[0]
+                    
+                    s_str = f"S{season:02d}"
+                    e_str = f"E{episode:02d}"
+                    inferred_name = f"{cached_title} - {s_str}{e_str}{ext}"
+                    full_new_path = os.path.join(dirname, inferred_name)
+                    
+                    print(f"DEBUG: Cache hit for {dirname}: {inferred_name}")
+                    results.append((file_path, inferred_name, full_new_path, "Ready (Cached)", [inferred_name]))
+                else:
+                    # Missing number info, can't infer name even with title
+                     results.append((file_path, "Unknown", None, "Skipped", []))
+                     
             else:
-                # SLOW PATH: Fetch online metadata
+                # 3. SLOW PATH: Fetch online metadata
                 print(f"DEBUG: Local parse insufficient for {filename}, fetching online...")
-                metadata_list = self.renamer.fetch_metadata(guess)
+                metadata_list = self.renamer.fetch_metadata(guess, file_path)
                 proposed_names = self.renamer.propose_rename(file_path, guess, metadata_list)
                 
                 if proposed_names:
@@ -118,6 +151,12 @@ class AutoTitleApp(customtkinter.CTk):
                     best_name = proposed_names[0]
                     dirname = os.path.dirname(file_path)
                     full_new_path = os.path.join(dirname, best_name)
+                    
+                    # Cache the title from the online result
+                    match = re.search(r"^(.*?) - S\d+E\d+", best_name)
+                    if match:
+                        known_dirs[dirname] = match.group(1)
+                        
                     results.append((file_path, best_name, full_new_path, "Ready (Online)", proposed_names))
                 else:
                      results.append((file_path, "Unknown", None, "Skipped", []))

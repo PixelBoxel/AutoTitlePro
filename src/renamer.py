@@ -29,15 +29,30 @@ class AutoRenamer:
         guess = guessit(file_path)
         return guess
 
-    def fetch_metadata(self, guess):
+    def fetch_metadata(self, guess, file_path=None):
         """Queries IMDb via DuckDuckGo + Cinemagoer. Returns list of matches."""
-        if not guess or 'title' not in guess:
-            return []
         
-        title = guess['title']
+        title = guess.get('title')
         year = guess.get('year')
         media_type = guess.get('type')
         
+        # Fallback: If title is missing or generic (e.g. "Episode 1"), use parent folder
+        if not title and file_path:
+            parent_name = os.path.basename(os.path.dirname(file_path))
+            # Basic cleanup of parent name? (Remove "Season X"?)
+            # If parent is "Season 1", we need the grandparent.
+            if re.match(r"^(Season|S)\s*\d+$", parent_name, re.IGNORECASE):
+                 grandparent = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
+                 if grandparent:
+                     print(f"DEBUG: Using grandparent '{grandparent}' as fallback title source.")
+                     title = grandparent
+            else:
+                 print(f"DEBUG: Using parent '{parent_name}' as fallback title source.")
+                 title = parent_name
+        
+        if not title:
+            return []
+            
         queries_to_try = []
         base_query = f"{title}"
         if year: base_query += f" {year}"
@@ -104,6 +119,10 @@ class AutoRenamer:
         for metadata in metadata_list:
             # Clean title
             title = metadata.get('title')
+            # Enforce Title Case
+            if title:
+                title = title.strip().title()
+                
             title = "".join([c for c in title if c not in r'<>:"/\|?*'])
             
             new_filename = None
@@ -148,9 +167,8 @@ class AutoRenamer:
             return None
             
         title = guess['title']
-        # guessit usually returns title as a clean string ("Adventure Time Fionna Cake").
-        # Should we apply standard casing? Title Case is safer.
-        # title = title.title() # Optional, users might prefer original capitalization if guessit preserves it.
+        # Enforce Title Case for consistency
+        title = title.strip().title()
         
         # Determine type
         media_type = guess.get('type')
@@ -197,6 +215,16 @@ class AutoRenamer:
         
         # Set of source directories we have moved files FROM, to clean up later
         cleanup_candidates = set()
+        
+        # Optimization: Cache root children for fast lookup in batch mode
+        # Map lower_case -> actual_name
+        root_children_cache = {}
+        try:
+            if os.path.exists(scan_root):
+                for child in os.listdir(scan_root):
+                    root_children_cache[child.lower()] = child
+        except OSError:
+            pass
 
         for item in scanned_files:
             original, new_name, current_path, status, _ = item
@@ -249,37 +277,41 @@ class AutoRenamer:
                 final_show_dir = abs_root
             else:
                 # Case 2: The Show Folder should be a child of Root (e.g. user selected "TV Shows")
+                
                 found_match = None
-                if os.path.exists(abs_root):
-                    try:
-                        for child in os.listdir(abs_root):
-                            if child.lower() == show_name.lower():
-                                child_path = os.path.join(abs_root, child)
-                                if os.path.isdir(child_path):
-                                    # Found it! Check casing.
-                                    if child != show_name:
-                                        # Wrong casing (e.g. "halo"). Rename.
-                                        print(f"DEBUG: Fixing case for Show Folder: {child} -> {show_name}")
-                                        temp_path = os.path.join(abs_root, f"{child}_temp_rename")
-                                        final_path = os.path.join(abs_root, show_name)
-                                        try:
-                                            os.rename(child_path, temp_path)
-                                            os.rename(temp_path, final_path)
-                                            child_path = final_path
-                                            stats["folders_renamed"] += 1
-                                        except OSError as e:
-                                            print(f"Error capitalizing show folder: {e}")
-                                            # Fallback to existing
-                                    
-                                    found_match = child_path
-                                    break
-                    except OSError:
-                        pass
+                # Use cache for O(1) lookup
+                existing_child = root_children_cache.get(show_name.lower())
+                
+                if existing_child:
+                    child_path = os.path.join(abs_root, existing_child)
+                    if os.path.isdir(child_path):
+                        # Found it! Check casing.
+                        if existing_child != show_name:
+                            # Wrong casing (e.g. "halo"). Rename.
+                            print(f"DEBUG: Fixing case for Show Folder: {existing_child} -> {show_name}")
+                            temp_path = os.path.join(abs_root, f"{existing_child}_temp_rename")
+                            final_path = os.path.join(abs_root, show_name)
+                            try:
+                                os.rename(child_path, temp_path)
+                                os.rename(temp_path, final_path)
+                                child_path = final_path
+                                # Update cache
+                                root_children_cache[show_name.lower()] = show_name
+                                stats["folders_renamed"] += 1
+                            except OSError as e:
+                                print(f"Error capitalizing show folder: {e}")
+                                # Fallback to existing
+                        
+                        found_match = child_path
                 
                 if found_match:
                     final_show_dir = found_match
                 else:
                     final_show_dir = os.path.join(abs_root, show_name)
+                    # We might create it, so update cache for subsequent files!
+                    # Only logically, the directory doesn't verify existence until makedirs
+                    # keys are lower case
+                    root_children_cache[show_name.lower()] = show_name
 
             # --- Determine Season Dir & Fix Case ---
             # We must check if season dir exists inside final_show_dir with wrong case
