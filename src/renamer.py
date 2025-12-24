@@ -8,7 +8,7 @@ import datetime
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
 # Static version for release tracking
-__version__ = "v2025.12.24.08"
+__version__ = "v2025.12.24.13"
 
 class AutoRenamer:
     def __init__(self):
@@ -259,14 +259,30 @@ class AutoRenamer:
         except OSError:
             pass
 
+        # Track directory renames to fix 'abs_current' for subsequent files
+        # List of (old_abs_path, new_abs_path)
+        path_replacements = []
+
         for item in scanned_files:
             original, new_name, current_path, status, _ = item
             
             valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)", "Skipped Rename"]
-            if status not in valid_statuses or not current_path or not os.path.exists(current_path):
+            if status not in valid_statuses or not current_path:
                 continue
                 
-            filename = os.path.basename(current_path)
+            # Resolve current path based on previous directory renames
+            abs_current = os.path.abspath(current_path)
+            for old_p, new_p in path_replacements:
+                if abs_current == old_p or abs_current.startswith(old_p + os.sep):
+                     rel = os.path.relpath(abs_current, old_p)
+                     abs_current = os.path.join(new_p, rel)
+            
+            if not os.path.exists(abs_current):
+                # If resolving didn't help (or file moved/deleted externally), skip
+                print(f"DEBUG: File not found at {abs_current}, skipping.")
+                continue
+
+            filename = os.path.basename(abs_current)
             # Safe regex for cleaned files
             match = re.search(r"^(.*?) - S(\d+)E\d+", filename)
             if not match:
@@ -290,7 +306,6 @@ class AutoRenamer:
 
             # Normalize paths
             try:
-                abs_current = os.path.abspath(current_path)
                 abs_root = os.path.abspath(scan_root)
             except Exception:
                 continue
@@ -299,48 +314,127 @@ class AutoRenamer:
             
             final_show_dir = None
             
-            # Case 1: The Root IS the Show Folder (e.g. user selected "Halo")
+            # Case 1: The Root IS the Show Folder (e.g. user selected "halo")
             if root_name.lower() == show_name.lower():
-                # We can't easily rename the root scanning directory itself safely.
-                # Assume it is acceptable or user must rename root manually.
+                # If casing is wrong, we SHOULD rename the root for consistency.
+                if root_name != show_name:
+                    print(f"DEBUG: Fixing case for Root Show Folder: {root_name} -> {show_name}")
+                    new_root_path = os.path.join(os.path.dirname(abs_root), show_name)
+                    temp_root_path = os.path.join(os.path.dirname(abs_root), f"{root_name}_temp_rename")
+                    
+                    try:
+                        os.rename(abs_root, temp_root_path)
+                        os.rename(temp_root_path, new_root_path)
+                        
+                        # Update our references
+                        stats["folders_renamed"] += 1
+                        path_replacements.append((abs_root, new_root_path))
+                        
+                        # Update abs_root for future iterations of this loop? 
+                        # abs_root is calculated per item? No, abs_root is constant.
+                        # We must update abs_root variable!
+                        abs_root = new_root_path
+                        # Also scan_root?
+                        scan_root = new_root_path
+                        
+                        # CRITICAL: Update abs_current because it lives inside abs_root
+                        # We must re-resolve abs_current immediately
+                        abs_current = os.path.join(new_root_path, os.path.relpath(abs_current, path_replacements[-1][0]))
+                        
+                    except OSError as e:
+                        print(f"Error capitalizing root folder: {e}")
+                        # Fallback: Treat existing root as the show dir despite case
+                        
+                # Fallback: Treat existing root as the show dir despite case
+                        
                 final_show_dir = abs_root
             else:
-                # Case 2: The Show Folder should be a child of Root (e.g. user selected "TV Shows")
+                # Case 3: We are inside the Show Folder (e.g. scan_root is "Season 1", parent is "halo")
+                # User selected a subfolder. We should check the parent.
+                parent_dir = os.path.dirname(abs_root)
+                parent_name = os.path.basename(parent_dir)
                 
-                found_match = None
-                # Use cache for O(1) lookup
-                existing_child = root_children_cache.get(show_name.lower())
-                
-                if existing_child:
-                    child_path = os.path.join(abs_root, existing_child)
-                    if os.path.isdir(child_path):
-                        # Found it! Check casing.
-                        if existing_child != show_name:
-                            # Wrong casing (e.g. "halo"). Rename.
-                            print(f"DEBUG: Fixing case for Show Folder: {existing_child} -> {show_name}")
-                            temp_path = os.path.join(abs_root, f"{existing_child}_temp_rename")
-                            final_path = os.path.join(abs_root, show_name)
-                            try:
-                                os.rename(child_path, temp_path)
-                                os.rename(temp_path, final_path)
-                                child_path = final_path
-                                # Update cache
-                                root_children_cache[show_name.lower()] = show_name
-                                stats["folders_renamed"] += 1
-                            except OSError as e:
-                                print(f"Error capitalizing show folder: {e}")
-                                # Fallback to existing
-                        
-                        found_match = child_path
-                
-                if found_match:
-                    final_show_dir = found_match
+                if parent_name.lower() == show_name.lower():
+                    # We are INSIDE the show folder.
+                    
+                    # Check casing of PARENT
+                    if parent_name != show_name:
+                         print(f"DEBUG: Fixing case for Parent Show Folder: {parent_name} -> {show_name}")
+                         grandparent = os.path.dirname(parent_dir)
+                         new_parent_path = os.path.join(grandparent, show_name)
+                         temp_parent_path = os.path.join(grandparent, f"{parent_name}_temp_rename")
+                         
+                         try:
+                             # Rename Parent
+                             os.rename(parent_dir, temp_parent_path)
+                             os.rename(temp_parent_path, new_parent_path)
+                             
+                             stats["folders_renamed"] += 1
+                             # Track replacement logic
+                             # This invalidates scan_root and everything inside it!
+                             path_replacements.append((parent_dir, new_parent_path))
+                             
+                             # Update our local variables
+                             parent_dir = new_parent_path
+                             # scan_root has moved relative to FS, so update abs_root
+                             # abs_root was "parent_dir/root_name"
+                             abs_root = os.path.join(new_parent_path, root_name)
+                             scan_root = abs_root # For consistency
+                             
+                             # CRITICAL: Re-resolve abs_current
+                             if abs_current.startswith(path_replacements[-1][0] + os.sep):
+                                  rel = os.path.relpath(abs_current, path_replacements[-1][0])
+                                  abs_current = os.path.join(new_parent_path, rel)
+                                  
+                         except OSError as e:
+                             print(f"Error capitalizing parent show folder: {e}")
+                    
+                    final_show_dir = parent_dir
+                    
                 else:
-                    final_show_dir = os.path.join(abs_root, show_name)
-                    # We might create it, so update cache for subsequent files!
-                    # Only logically, the directory doesn't verify existence until makedirs
-                    # keys are lower case
-                    root_children_cache[show_name.lower()] = show_name
+                    # Case 2: The Show Folder should be a child of Root (e.g. user selected "TV Shows")
+                    
+                    found_match = None
+                    # Use cache for O(1) lookup
+                    existing_child = root_children_cache.get(show_name.lower())
+                    
+                    if existing_child:
+                        child_path = os.path.join(abs_root, existing_child)
+                        if os.path.isdir(child_path):
+                            # Found it! Check casing.
+                            if existing_child != show_name:
+                                # Wrong casing (e.g. "halo"). Rename.
+                                print(f"DEBUG: Fixing case for Show Folder: {existing_child} -> {show_name}")
+                                temp_path = os.path.join(abs_root, f"{existing_child}_temp_rename")
+                                final_path = os.path.join(abs_root, show_name)
+                                try:
+                                    os.rename(child_path, temp_path)
+                                    os.rename(temp_path, final_path)
+                                    child_path = final_path
+                                    # Update cache
+                                    root_children_cache[show_name.lower()] = show_name
+                                    stats["folders_renamed"] += 1
+                                    # Track replacement
+                                    old_abs = os.path.join(abs_root, existing_child)
+                                    path_replacements.append((old_abs, final_path))
+                                    
+                                    # CRITICAL: If abs_current was inside this folder, we must update it NOW
+                                    # otherwise the move below will look for file in old folder
+                                    if abs_current.startswith(old_abs + os.sep) or abs_current == old_abs:
+                                         abs_current = os.path.join(final_path, os.path.relpath(abs_current, old_abs))
+                                         
+                                except OSError as e:
+                                    print(f"Error capitalizing show folder: {e}")
+                                    # Fallback to existing
+                            
+                            found_match = child_path
+                    
+                    if found_match:
+                        final_show_dir = found_match
+                    else:
+                        final_show_dir = os.path.join(abs_root, show_name)
+                        # We might create it, so update cache for subsequent files!
+                        root_children_cache[show_name.lower()] = show_name
 
             # --- Determine Season Dir & Fix Case ---
             # We must check if season dir exists inside final_show_dir with wrong case
@@ -360,6 +454,8 @@ class AutoRenamer:
                                         os.rename(child_path, temp_path)
                                         os.rename(temp_path, final_path)
                                         stats["folders_renamed"] += 1
+                                        # Track replacement
+                                        path_replacements.append((child_path, final_path))
                                     except OSError as e:
                                          print(f"Error capitalizing season folder: {e}")
                                 break
@@ -508,3 +604,211 @@ class AutoRenamer:
                          
         return updated_files
 
+        return updated_files
+
+    def preview_folder_changes(self, scanned_files, scan_root, settings=None):
+        """
+        Simulates the organization process to generate a preview of folder operations.
+        Returns a list of dicts:
+        [
+            {"action": "Renkame Folder", "src": "...", "dst": "..."},
+            {"action": "Create Folder", "src": None, "dst": "..."},
+            {"action": "Move File", "src": "...", "dst": "...", "file": "video.mkv"},
+            ...
+        ]
+        """
+        if settings is None: settings = {}
+        # Make a copy of scanned_files to not mutate originals (though tuples are immutable)
+        # We need to simulate the state tracking
+        
+        # We REUSE the logic from organize_files but without os.rename
+        # This is tricky without code duplication. 
+        # Ideally organize_files should take a dry_run flag.
+        
+        # For now, let's implement a lighter version that predicts based on the same rules.
+        
+        preview_ops = []
+        organize_enabled = settings.get("organize", True)
+        title_case_enabled = settings.get("title_case", True)
+        
+        if not organize_enabled:
+            return []
+
+        # We need to simulate the path replacements
+        path_replacements = [] # (old, new)
+        
+        # We need to simulate created dirs to avoid duplicate "Create" ops
+        virtual_dirs = set()
+        if os.path.exists(scan_root):
+             virtual_dirs.add(os.path.abspath(scan_root))
+             
+        # Root children cache simulation
+        root_children_lower = {}
+        try:
+            if os.path.exists(scan_root):
+                for child in os.listdir(scan_root):
+                    root_children_lower[child.lower()] = child
+        except OSError: pass
+
+        # We assume processing order is same as list
+        for item in scanned_files:
+            original, new_name, current_path, status, _ = item
+            
+            valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)", "Skipped Rename"]
+            if status not in valid_statuses:
+                continue
+            
+            # Resolve basics
+            if current_path: 
+                abs_current = os.path.abspath(current_path)
+            else:
+                abs_current = os.path.abspath(original)
+
+            # --- SIMULATE PATH RESOLUTION ---
+            for old_p, new_p in path_replacements:
+                if abs_current == old_p or abs_current.startswith(old_p + os.sep):
+                     rel = os.path.relpath(abs_current, old_p)
+                     abs_current = os.path.join(new_p, rel)
+            
+            filename = os.path.basename(abs_current)
+            match = re.search(r"^(.*?) - S(\d+)E\d+", filename)
+            if not match: continue
+            
+            raw_show_name = match.group(1)
+            season_num = int(match.group(2))
+            
+            show_name = raw_show_name.strip()
+            if title_case_enabled: show_name = show_name.title()
+            
+            target_season_dir_name = f"{show_name} - Season {season_num}"
+            
+            # --- ROOT/SHOW FOLDER LOGIC ---
+            try:
+                abs_root = os.path.abspath(scan_root)
+                # Resolve root if it was renamed in sim?
+                # Actually strict flattening logic renames root/parent once.
+                # We need to track that.
+                
+                # Check simulation cache for root updates
+                for old_p, new_p in path_replacements:
+                     if abs_root == old_p:
+                         abs_root = new_p
+            except: continue
+            
+            root_name = os.path.basename(abs_root)
+            final_show_dir = None
+            
+            # Case 1: Root IS Show
+            if root_name.lower() == show_name.lower():
+                if root_name != show_name:
+                    # Simulation: "Rename Root"
+                    # Only do this once
+                    new_root = os.path.join(os.path.dirname(abs_root), show_name)
+                    if abs_root not in [x[0] for x in path_replacements]: 
+                        preview_ops.append({
+                            "action": "Rename Folder", 
+                            "src": abs_root, 
+                            "dst": new_root,
+                            "reason": "Fix Case"
+                        })
+                        path_replacements.append((abs_root, new_root))
+                        abs_root = new_root
+                        scan_root = new_root # Update local ref
+                        
+                        # Update abs_current
+                        # (simplified, assumed strictly strictly strictly aligned)
+                        pass
+                final_show_dir = abs_root
+            else:
+                 # Case 3: Inside Show (Parent check) - Priority over Case 2
+                parent_dir = os.path.dirname(abs_root)
+                parent_name = os.path.basename(parent_dir)
+                
+                if parent_name.lower() == show_name.lower():
+                     if parent_name != show_name:
+                         grandparent = os.path.dirname(parent_dir)
+                         new_parent = os.path.join(grandparent, show_name)
+                         if parent_dir not in [x[0] for x in path_replacements]:
+                             preview_ops.append({
+                                "action": "Rename Folder",
+                                "src": parent_dir,
+                                "dst": new_parent,
+                                "reason": "Fix Parent Case"
+                             })
+                             path_replacements.append((parent_dir, new_parent))
+                             parent_dir = new_parent
+                             abs_root = os.path.join(new_parent, root_name)
+                     final_show_dir = parent_dir
+                else:
+                    # Case 2: Child of Root
+                    existing_child = root_children_lower.get(show_name.lower())
+                    
+                    if existing_child:
+                        child_path = os.path.join(abs_root, existing_child)
+                        if existing_child != show_name:
+                             final_path = os.path.join(abs_root, show_name)
+                             # Check if we already planned to rename this
+                             if child_path not in [x[0] for x in path_replacements]:
+                                 preview_ops.append({
+                                    "action": "Rename Folder",
+                                    "src": child_path,
+                                    "dst": final_path,
+                                    "reason": "Fix Case"
+                                 })
+                                 path_replacements.append((child_path, final_path))
+                                 root_children_lower[show_name.lower()] = show_name # update cache
+                             final_show_dir = final_path
+                        else:
+                             final_show_dir = child_path
+                    else:
+                        # Create new show folder
+                        final_show_dir = os.path.join(abs_root, show_name)
+                        if final_show_dir not in virtual_dirs and not os.path.exists(final_show_dir):
+                            preview_ops.append({
+                                "action": "Create Folder",
+                                "src": None,
+                                "dst": final_show_dir,
+                                "reason": "New Show"
+                            })
+                            virtual_dirs.add(final_show_dir)
+                            root_children_lower[show_name.lower()] = show_name
+
+            # --- SEASON FOLDER LOGIC ---
+            final_season_dir = os.path.join(final_show_dir, target_season_dir_name)
+            
+            # Check for existing season folder (to rename)
+            # This is hard to simulate perfectly without listing dirs, 
+            # but we can assume if we are moving from a folder named "season 1" it might be it.
+            # For preview, we mostly care about Creations and major Renames.
+            
+            if final_season_dir not in virtual_dirs and not os.path.exists(final_season_dir):
+                 # We might be renaming an existing one?
+                 # Simplifying assumption for preview: If it doesn't exist, we Create it.
+                 # Unless we detect a case mismatch on disk (too expensive to scan every time?)
+                 preview_ops.append({
+                    "action": "Create Folder",
+                    "src": None,
+                    "dst": final_season_dir,
+                    "reason": "Season Folder"
+                 })
+                 virtual_dirs.add(final_season_dir)
+                 
+            # --- FILE MOVE LOGIC ---
+            final_file_path = os.path.join(final_season_dir, filename)
+            if abs_current != final_file_path:
+                # Dedupe sim moves?
+                pass
+                # We don't list every file move in Folder Preview tab, that's too much noise?
+                # The user asked for "Folder renaming tab".
+                # Let's focus on Folder Ops.
+                
+        # Deduplicate ops just in case
+        unique_ops = []
+        seen_ops = set()
+        for op in preview_ops:
+            k = (op['action'], op['src'], op['dst'])
+            if k not in seen_ops:
+                unique_ops.append(op)
+                seen_ops.add(k)
+                
+        return unique_ops

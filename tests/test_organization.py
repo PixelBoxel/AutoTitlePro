@@ -27,7 +27,7 @@ def test_organization():
     ]
     
     print("--- Organizing Loose File ---")
-    renamer.organize_files(scanned)
+    renamer.organize_files(scanned, downloads_dir)
     
     target_path = os.path.join(downloads_dir, "Adventure Time", "Adventure Time - Season 1", filename)
     if os.path.exists(target_path):
@@ -51,7 +51,7 @@ def test_organization():
     scanned2 = [(f2, slug, f2, "Renamed", [])]
     
     print("\n--- Organizing Season Folder ---")
-    renamer.organize_files(scanned2)
+    renamer.organize_files(scanned2, downloads_dir)
     
     target2 = os.path.join(downloads_dir, "Adventure Time", "Adventure Time - Season 1", slug)
     if os.path.exists(target2):

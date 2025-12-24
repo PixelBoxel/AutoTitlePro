@@ -40,12 +40,18 @@ class AutoTitleApp(customtkinter.CTk):
             "rename_files": True 
         }
 
-        # Content Area - Scrollable Frame for file list
-        self.scrollable_frame = customtkinter.CTkScrollableFrame(self, label_text="Files Found")
-        self.scrollable_frame.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
-        self.scrollable_frame.grid_columnconfigure(0, weight=1)
+        # Content Area - Tab View
+        self.tab_view = customtkinter.CTkTabview(self)
+        self.tab_view.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
         
-        self.status_label = customtkinter.CTkLabel(self.scrollable_frame, text="Select a directory to start scanning.")
+        self.tab_files = self.tab_view.add("Files")
+        self.tab_folders = self.tab_view.add("Folders")
+        
+        # Configure Grid Weights for tabs
+        self.tab_files.grid_columnconfigure(0, weight=1)
+        self.tab_folders.grid_columnconfigure(0, weight=1)
+        
+        self.status_label = customtkinter.CTkLabel(self.tab_files, text="Select a directory to start scanning.")
         self.status_label.pack(pady=20)
 
         # Footer
@@ -122,10 +128,12 @@ class AutoTitleApp(customtkinter.CTk):
         self.run_button.configure(state="disabled")
         
         # Clear previous results
-        for widget in self.scrollable_frame.winfo_children():
+        for widget in self.tab_files.winfo_children():
+            widget.destroy()
+        for widget in self.tab_folders.winfo_children():
             widget.destroy()
         
-        self.status_label = customtkinter.CTkLabel(self.scrollable_frame, text="Scanning directory and fetching metadata...")
+        self.status_label = customtkinter.CTkLabel(self.tab_files, text="Scanning directory and fetching metadata...")
         self.status_label.pack(pady=20)
         
         self.current_label.pack(side="bottom", pady=2)
@@ -230,50 +238,116 @@ class AutoTitleApp(customtkinter.CTk):
         self.current_label.pack_forget()
         self.select_button.configure(state="normal")
         
-        # Clear loading label
-        for widget in self.scrollable_frame.winfo_children():
+        # Clear loading labels
+        for widget in self.tab_files.winfo_children():
             widget.destroy()
 
         if not self.scanned_files:
-            lbl = customtkinter.CTkLabel(self.scrollable_frame, text="No video files found.")
+            lbl = customtkinter.CTkLabel(self.tab_files, text="No video files found.")
             lbl.pack(pady=20)
             return
 
         # Sort results: Unknowns/Failures first, then by filename
-        # key tuple: (is_known (bool), filename)
-        # We want is_known=False (Unknown) to be first. False < True.
-        # So we sort by (is_known, filename).
-        # Actually better to sort by status "Unknown" or empty new_name.
-        
         self.scanned_files.sort(key=lambda x: (x[1] != "Unknown" and x[1] is not None, os.path.basename(x[0])))
 
         self.run_button.configure(state="normal")
         self.comboboxes = {} # Map index to combobox widget
+        
+        # Add Header
+        header_frame = customtkinter.CTkFrame(self.tab_files, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=5)
+        customtkinter.CTkLabel(header_frame, text="Current Filename", font=customtkinter.CTkFont(size=12, weight="bold"), anchor="w", width=300).pack(side="left", padx=10)
+        customtkinter.CTkLabel(header_frame, text="New Filename", font=customtkinter.CTkFont(size=12, weight="bold"), anchor="w", width=300).pack(side="left", padx=10)
 
-        # Create table-like rows
         for i, (original, new_name, _, status, options) in enumerate(self.scanned_files):
-            row_frame = customtkinter.CTkFrame(self.scrollable_frame)
-            row_frame.pack(fill="x", padx=5, pady=2)
+            row_frame = customtkinter.CTkFrame(self.tab_files)
+            row_frame.pack(fill="x", padx=10, pady=2)
             
+            # Original Name
             orig_name = os.path.basename(original)
             
-            # WIDENED COLUMNS
-            lbl_orig = customtkinter.CTkLabel(row_frame, text=orig_name, width=450, anchor="w")
-            lbl_orig.pack(side="left", padx=5)
+            # Color coding
+            color = "white"
+            # If status contains "Unknown" or "Skipped", use red
+            if "Unknown" in status or "Skipped" in status:
+                color = "#ff5555" # Red
+                if not new_name: new_name = "Unknown"
+            elif "Cached" in status: 
+                color = "#55ff55" # Green
             
-            arrow = customtkinter.CTkLabel(row_frame, text="->", width=30)
-            arrow.pack(side="left")
+            lbl_orig = customtkinter.CTkLabel(row_frame, text=orig_name, width=400, anchor="w", text_color=color)
+            lbl_orig.pack(side="left", padx=10)
             
-            if options:
-                # Use Combobox - WIDENED
-                combo = customtkinter.CTkComboBox(row_frame, values=options, width=500)
-                combo.set(new_name) # Default
-                combo.pack(side="left", padx=5)
-                self.comboboxes[i] = combo
+            customtkinter.CTkLabel(row_frame, text="➜").pack(side="left", padx=5)
+            
+            # Options
+            if not options: options = ["Unknown"]
+            
+            # Ensure new_name is in options
+            if new_name and new_name not in options:
+                options.insert(0, new_name)
+                
+            combo = customtkinter.CTkComboBox(row_frame, values=options, width=400)
+            if new_name:
+                combo.set(new_name)
             else:
-                lbl_new = customtkinter.CTkLabel(row_frame, text="Unknown/No Match", width=500, anchor="w", text_color="red")
-                lbl_new.pack(side="left", padx=5)
-                self.comboboxes[i] = None
+                combo.set("Unknown")
+                
+            combo.pack(side="left", padx=10)
+            self.comboboxes[i] = combo
+            
+        # Update Folders Tab
+        self.refresh_folder_preview()
+
+    def refresh_folder_preview(self):
+        # Clear Folders Tab
+        for widget in self.tab_folders.winfo_children():
+            widget.destroy()
+            
+        # Add Header
+        h_frame = customtkinter.CTkFrame(self.tab_folders, fg_color="transparent")
+        h_frame.pack(fill="x", padx=10, pady=5)
+        customtkinter.CTkLabel(h_frame, text="Action", width=120, anchor="w", font=customtkinter.CTkFont(size=12, weight="bold")).pack(side="left", padx=5)
+        customtkinter.CTkLabel(h_frame, text="Source", width=300, anchor="w", font=customtkinter.CTkFont(size=12, weight="bold")).pack(side="left", padx=5)
+        customtkinter.CTkLabel(h_frame, text="Destination", width=300, anchor="w", font=customtkinter.CTkFont(size=12, weight="bold")).pack(side="left", padx=5)
+
+        ops = self.renamer.preview_folder_changes(self.scanned_files, self.current_directory, self.settings)
+        
+        if not ops:
+            customtkinter.CTkLabel(self.tab_folders, text="No folder changes detected.").pack(pady=20)
+            return
+
+        for op in ops:
+            row = customtkinter.CTkFrame(self.tab_folders)
+            row.pack(fill="x", padx=10, pady=2)
+            
+            action = op['action']
+            src = op['src'] if op['src'] else ""
+            dst = op['dst']
+            reason = op.get('reason', '')
+            
+            if action == "Create Folder":
+                src_txt = "-"
+                # Show relative path relative to scan_root if possible for readability
+                try:
+                    dst_txt = os.path.relpath(dst, self.current_directory)
+                except:
+                    dst_txt = os.path.basename(dst)
+                col = "#55ff55" # Green
+            elif action == "Rename Folder":
+                src_txt = os.path.basename(src)
+                dst_txt = os.path.basename(dst)
+                col = "#ffff55" # Yellow
+            else:
+                src_txt = src
+                dst_txt = dst
+                col = "white"
+                
+            customtkinter.CTkLabel(row, text=action, width=120, anchor="w", text_color=col).pack(side="left", padx=5)
+            customtkinter.CTkLabel(row, text=src_txt, width=300, anchor="w").pack(side="left", padx=5)
+            customtkinter.CTkLabel(row, text=f"{dst_txt} ({reason})", width=300, anchor="w").pack(side="left", padx=5)
+
+
 
     def start_renaming(self):
         # Update scanned_files with current selections from comboboxes
