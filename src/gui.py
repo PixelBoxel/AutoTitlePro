@@ -65,9 +65,32 @@ class Watchdog:
 class AutoTitleApp(customtkinter.CTk):
     def __init__(self):
         super().__init__()
+        
+        # Ensure Taskbar Icon works (AppUserModelID)
+        try:
+            from ctypes import windll
+            myappid = f'autotitlepro.version.{__version__}'
+            windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
 
         self.title(f"AutoTitlePro {__version__}")
         self.geometry("1200x800")
+        
+        # Icon resource path helper
+        def resource_path(relative_path):
+            try:
+                base_path = sys._MEIPASS
+            except Exception:
+                # In dev, we are in src/, so we need to go up one level if using this logic,
+                # BUT if CWD is root (standard), we just need relative path.
+                # To be safe, let's use the file location logic for dev.
+                base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            return os.path.join(base_path, relative_path)
+
+        icon_path = resource_path(os.path.join('assets', 'icon.ico'))
+        if os.path.exists(icon_path):
+            self.iconbitmap(icon_path)
         
         self.renamer = AutoRenamer()
         self.scanned_files = [] # List of tuples: (original_path, new_name_candidate, full_new_path, status)

@@ -5,8 +5,8 @@ a = Analysis(
     ['src\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:\\Users\\Conor\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages\\customtkinter', 'customtkinter/')],
-    hiddenimports=['imdb', 'guessit', 'PIL._tkinter_finder'],
+    datas=[('C:\\Users\\Conor\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages\\customtkinter', 'customtkinter/'), ('C:\\Users\\Conor\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages\\babelfish', 'babelfish/'), ('assets/icon.ico', 'assets/')],
+    hiddenimports=['imdb', 'guessit', 'babelfish', 'PIL._tkinter_finder'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='NONE',
+    icon=['assets\\icon.ico'],
 )

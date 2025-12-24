@@ -8,7 +8,7 @@ import datetime
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
 # Static version for release tracking
-__version__ = "v2025.12.24.10"
+__version__ = "v2025.12.24.11"
 
 class AutoRenamer:
     def __init__(self):

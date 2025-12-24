@@ -4,7 +4,7 @@
 
 AutoTitlePro is a powerful Windows utility that automatically identifies, renames, and organizes your video files (Movies & TV Shows) using a combination of local heuristics, context inference, and IMDb metadata.
 
-**Version**: v2025.12.24.10
+**Version**: v2025.12.24.11
 
 ## 🚀 Key Features
 
