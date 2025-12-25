@@ -8,7 +8,7 @@ import datetime
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
 # Static version for release tracking
-__version__ = "v2025.12.24.11"
+__version__ = "v2025.12.25.01"
 
 class AutoRenamer:
     def __init__(self):
@@ -25,10 +25,27 @@ class AutoRenamer:
                     files.append(os.path.join(root, filename))
         return files
 
-    def parse_filename(self, file_path):
+    def parse_filename(self, file_path, media_type_hint=None):
         """Uses guessit to extract metadata from the full file path."""
         # guessit is smart enough to handle full paths and extract info from parent folders
-        guess = guessit(file_path)
+        options = {}
+        if media_type_hint:
+            options['type'] = media_type_hint
+            
+        guess = guessit(file_path, options=options)
+        
+        # --- Sanitize Guess (Fix Leading Sort Numbers) ---
+        # If guessit returns "01 A Nightmare", we strip the "01 ".
+        # We only do this for leading ZEROs to avoid killing "1917" or "10 Cloverfield".
+        if 'title' in guess:
+            raw_title = guess['title']
+            # Regex: Start with '0', digit, then separator (space . - _)
+            match = re.match(r"^0\d+[\s\.\-_]+(.+)", raw_title)
+            if match:
+                clean_title = match.group(1).strip()
+                print(f"DEBUG: Stripping sort number from guess: '{raw_title}' -> '{clean_title}'")
+                guess['title'] = clean_title
+                
         return guess
 
     def fetch_metadata(self, guess, file_path=None):
@@ -38,35 +55,74 @@ class AutoRenamer:
         year = guess.get('year')
         media_type = guess.get('type')
         
-        # Fallback: If title is missing or generic (e.g. "Episode 1"), use parent folder
+        GENERIC_FOLDERS = {
+            "movies", "films", "downloads", "completed", "video", "videos", 
+            "tv", "tv shows", "tv series", "plex", "media", "unsorted", "library", "unknown"
+        }
+
+        # 1. Sanitize 'guess' title immediately
+        if title and title.strip().lower() in GENERIC_FOLDERS:
+            print(f"DEBUG: 'guessit' returned generic title '{title}'. Discarding.")
+            title = None 
+
+        # 2. Fallback: context inference
         if not title and file_path:
             parent_name = os.path.basename(os.path.dirname(file_path))
-            # Basic cleanup of parent name? (Remove "Season X"?)
-            # If parent is "Season 1", we need the grandparent.
-            if re.match(r"^(Season|S)\s*\d+$", parent_name, re.IGNORECASE):
-                 grandparent = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
-                 if grandparent:
-                     print(f"DEBUG: Using grandparent '{grandparent}' as fallback title source.")
-                     title = grandparent
+            clean_parent = parent_name.strip().lower()
+            
+            if clean_parent in GENERIC_FOLDERS:
+                print(f"DEBUG: Generic parent '{parent_name}'. Trying raw filename.")
+                # Try raw filename
+                filename_base = os.path.splitext(os.path.basename(file_path))[0]
+                # Cleanup common scene tags
+                search_term = re.sub(r"[\.\-_]", " ", filename_base)
+                search_term = re.sub(r"(1080p|720p|2160p|4k|bluray|web-dl|x264|h264|aac|mp4|mkv)", "", search_term, flags=re.IGNORECASE)
+                title = search_term.strip()
             else:
-                 print(f"DEBUG: Using parent '{parent_name}' as fallback title source.")
-                 title = parent_name
+                if re.match(r"^(Season|S)\s*\d+$", parent_name, re.IGNORECASE):
+                     grandparent = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
+                     grand_clean = grandparent.strip().lower()
+                     if grandparent and grand_clean not in GENERIC_FOLDERS:
+                         title = grandparent
+                else:
+                     title = parent_name
         
         if not title:
-            return []
-            
+             # Final Hail Mary: Raw filename
+             title = os.path.splitext(os.path.basename(file_path))[0].replace(".", " ")
+
         queries_to_try = []
+        
+        # --- Handle Leading Sort Numbers (e.g. "01 A Nightmare") ---
+        # Heuristic: Starts with 0, followed by digit.
+        # This avoids stripping "10 Cloverfield" or "1917" or "2001".
+        clean_title_candidate = None
+        if title:
+            # Check for "01 Title", "01. Title", "01 - Title"
+            match = re.match(r"^0\d+[\s\.\-_]+(.+)", title)
+            if match:
+                clean_title_candidate = match.group(1).strip()
+                print(f"DEBUG: derived clean title '{clean_title_candidate}' from '{title}'")
+
         base_query = f"{title}"
         if year: base_query += f" {year}"
         
         # Priority 1: Specific type
         if media_type == 'episode':
             queries_to_try.append(base_query + " tv series")
+            if clean_title_candidate: queries_to_try.append(f"{clean_title_candidate} {year} tv series" if year else f"{clean_title_candidate} tv series")
+                
         elif media_type == 'movie':
             queries_to_try.append(base_query + " movie")
+            if clean_title_candidate: queries_to_try.append(f"{clean_title_candidate} {year} movie" if year else f"{clean_title_candidate} movie")
             
         # Priority 2: Base query
         queries_to_try.append(base_query)
+        if clean_title_candidate: queries_to_try.append(f"{clean_title_candidate} {year}" if year else clean_title_candidate)
+        
+        # Add loose filename search if different
+        loose = os.path.splitext(os.path.basename(file_path))[0].replace(".", " ")
+        if loose != title: queries_to_try.append(loose)
 
         candidates = []
         found_ids = set()
@@ -74,13 +130,14 @@ class AutoRenamer:
         try:
             with DDGS() as ddgs:
                 for q in queries_to_try:
+                    if len(candidates) >= 5: break
+                    
                     print(f"DEBUG: Searching DDG for '{q}'")
                     # Limit to results, search specifically for imdb
                     results_gen = ddgs.text(f"{q} imdb", max_results=5)
                     results_list = list(results_gen)
                     print(f"DEBUG: Query '{q}' returned {len(results_list)} results.")
                     
-                    found_in_this_query = False
                     for r in results_list:
                         url = r['href']
                         match = re.search(r'tt\d+', url)
@@ -88,19 +145,13 @@ class AutoRenamer:
                             imdb_id = match.group(0)
                             if imdb_id not in found_ids:
                                 found_ids.add(imdb_id)
-                                found_in_this_query = True
-                                # Fetch details
                                 try:
                                     clean_id = imdb_id.replace('tt', '')
                                     movie = self.ia.get_movie(clean_id)
-                                    candidates.append(movie)
+                                    if movie:
+                                        candidates.append(movie)
                                 except Exception as e:
                                     print(f"Error fetching ID {imdb_id}: {e}")
-                    
-                    # If we found good results with the specific query, maybe we stop?
-                    # But user wants options. Let's get up to 5 unique ones.
-                    if len(candidates) >= 5:
-                        break
             
             return candidates
 
@@ -180,6 +231,11 @@ class AutoRenamer:
         try:
             ignore_pattern = re.compile(r"^(season ?\d+|specials|featurettes|subs|subtitles|bonus|cd\d+)$", re.IGNORECASE)
             
+            GENERIC_FOLDERS = {
+                "movies", "films", "downloads", "completed", "video", "videos", 
+                "tv", "tv shows", "tv series", "plex", "media", "unsorted", "library", "unknown"
+            }
+
             # Start from parent
             parent = os.path.dirname(file_path)
             
@@ -189,7 +245,9 @@ class AutoRenamer:
                 if not dirname or len(dirname) < 2: # Root or empty
                     break
                     
-                if not ignore_pattern.match(dirname):
+                clean_name = dirname.strip().lower()
+                
+                if clean_name not in GENERIC_FOLDERS and not ignore_pattern.match(dirname):
                     # Found a potential candidate!
                     # Clean it: Remove trailing " - Season X" or " Season X"
                     title = dirname.strip()
@@ -722,14 +780,12 @@ class AutoRenamer:
                          
         return updated_files
 
-        return updated_files
-
     def preview_folder_changes(self, scanned_files, scan_root, settings=None):
         """
         Simulates the organization process to generate a preview of folder operations.
         Returns a list of dicts:
         [
-            {"action": "Renkame Folder", "src": "...", "dst": "..."},
+            {"action": "Rename Folder", "src": "...", "dst": "..."},
             {"action": "Create Folder", "src": None, "dst": "..."},
             {"action": "Move File", "src": "...", "dst": "...", "file": "video.mkv"},
             ...

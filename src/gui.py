@@ -114,6 +114,20 @@ class AutoTitleApp(customtkinter.CTk):
         # Organization Status Indicator
         self.org_indicator = customtkinter.CTkLabel(self.header_frame, text="", font=customtkinter.CTkFont(size=12, weight="bold"))
         self.org_indicator.pack(side="right", padx=20)
+        
+        # Media Type Toggle
+        self.type_var = customtkinter.StringVar(value="Auto")
+        self.type_switch = customtkinter.CTkSegmentedButton(self.header_frame, values=["Auto", "Movie", "TV"], variable=self.type_var)
+        self.type_switch.pack(side="right", padx=10)
+        self.type_label = customtkinter.CTkLabel(self.header_frame, text="Media Type:", font=customtkinter.CTkFont(size=12, weight="bold"))
+        self.type_label.pack(side="right", padx=(10, 5))
+        
+        # Deep Search Mode Toggle
+        self.search_mode_var = customtkinter.StringVar(value="Manual")
+        self.search_mode_switch = customtkinter.CTkSegmentedButton(self.header_frame, values=["Manual", "Auto"], variable=self.search_mode_var)
+        self.search_mode_switch.pack(side="right", padx=10)
+        self.search_mode_lbl = customtkinter.CTkLabel(self.header_frame, text="Deep Search:", font=customtkinter.CTkFont(size=12, weight="bold"))
+        self.search_mode_lbl.pack(side="right", padx=(10, 5))
 
         # Settings Storage (Default values)
         self.settings = {
@@ -302,6 +316,14 @@ class AutoTitleApp(customtkinter.CTk):
             # Get Format Setting
             fmt = self.settings.get("rename_format")
             
+            # Get Media Type Override (Base)
+            base_override = None
+            type_val = self.type_var.get()
+            if type_val == "Movie": base_override = 'movie'
+            elif type_val == "TV": base_override = 'episode'
+            
+            print(f"DEBUG: Starting scan of {directory} with mode={type_val}")
+            
             for i, file_path in enumerate(files):
                 # Watchdog Kick (I'm alive!)
                 if hasattr(self, 'watchdog'): self.watchdog.kick()
@@ -311,7 +333,19 @@ class AutoTitleApp(customtkinter.CTk):
                 dirname = os.path.dirname(file_path)
                 self.current_label.configure(text=f"Processing: {filename}")
                 
-                guess = self.renamer.parse_filename(file_path)
+                 # Dynamic Auto Logic
+                current_override = base_override
+                if type_val == "Auto":
+                    # Check path for keywords
+                    lower_path = file_path.lower()
+                    # Use os.sep for robust check, or just loose string matching
+                    if any(k in lower_path for k in ["/movies/", "\\movies\\", "films", "movie"]):
+                         current_override = 'movie'
+                    elif any(k in lower_path for k in ["/tv/", "\\tv\\", "shows", "series", "season"]):
+                         current_override = 'episode'
+
+                # PASS OVERRIDE TO PARSER
+                guess = self.renamer.parse_filename(file_path, current_override)
                 _, ext = os.path.splitext(file_path)
             
                 # --- CONTEXTUAL TITLE INFERENCE (NEW) ---
@@ -325,8 +359,22 @@ class AutoTitleApp(customtkinter.CTk):
                     # print(f"DEBUG: Context title found: '{context_title}'")
                     guess['title'] = context_title
                 
-                # 1. FAST PATH: Local Parse
-                local_name = self.renamer.generate_name_from_guess(guess, ext, format_string=fmt)
+                    guess['title'] = context_title
+                
+                # --- MANDATORY YEAR CHECK (Movies) ---
+                # If it's a movie and year is missing, and Deep Search is Auto, skip Fast Path.
+                skip_local = False
+                deep_search_mode = self.search_mode_var.get()
+                is_movie = (current_override == 'movie') or (guess.get('type') == 'movie')
+                
+                if is_movie and not guess.get('year') and deep_search_mode == "Auto":
+                     print(f"DEBUG: Missing year for movie '{filename}', forcing Deep Search.")
+                     skip_local = True
+                
+                # 1. FAST PATH: Local Parse (If not skipped)
+                local_name = None
+                if not skip_local:
+                    local_name = self.renamer.generate_name_from_guess(guess, ext, format_string=fmt)
                 
                 if local_name:
                     dirname = os.path.dirname(file_path)
@@ -426,8 +474,24 @@ class AutoTitleApp(customtkinter.CTk):
             lbl.pack(pady=20)
             return
 
-        # Sort results
-        self.scanned_files.sort(key=lambda x: (x[1] != "Unknown" and x[1] is not None, os.path.basename(x[0])))
+        # Sort results: Unknown -> Unchanged -> Changed
+        def sort_key(entry):
+             # entry = (original, new_name, full_new_path, status, options)
+             orig_name = os.path.basename(entry[0])
+             new_name = entry[1]
+             
+             # Priority 0: Unknown/Skipped
+             if "Unknown" in entry[3] or "Skipped" in entry[3] or not new_name or new_name == "Unknown":
+                 return (0, orig_name)
+             
+             # Priority 1: Unchanged (if enabled, we want to see these)
+             if new_name == orig_name:
+                 return (1, orig_name)
+                 
+             # Priority 2: Changed
+             return (2, orig_name)
+
+        self.scanned_files.sort(key=sort_key)
         self.run_button.configure(state="normal")
 
         # FILTER PHASE
@@ -471,6 +535,14 @@ class AutoTitleApp(customtkinter.CTk):
         # Callback to update the underlying data model when combobox changes
         # This preserves state even if we paginate away
         if 0 <= real_index < len(self.scanned_files):
+            # --- Handle Special Interactive Options ---
+            if new_value == "Manual Correction...":
+                self.handle_manual_rename(real_index)
+                return
+            elif new_value == "Deep Search...":
+                self.handle_deep_search(real_index)
+                return
+
             entry = self.scanned_files[real_index]
             # Tuple: (original, new_name, full_new_path, status, options)
              # Update new_name (index 1) and full_new_path (index 2)
@@ -479,9 +551,131 @@ class AutoTitleApp(customtkinter.CTk):
             full_new_path = os.path.join(dirname, new_value)
             
             # Construct new tuple
-            new_entry = (original, new_value, full_new_path, entry[3], entry[4])
+            new_entry = (original, new_value, full_new_path, "Ready (User)", entry[4])
             self.scanned_files[real_index] = new_entry
             print(f"DEBUG: Updated index {real_index} -> {new_value}")
+            
+            # Trigger folder preview refresh if needed
+            if self.settings.get("organize"):
+                self.after(100, self.refresh_folder_preview)
+
+    def handle_manual_rename(self, index):
+        dialog = customtkinter.CTkInputDialog(text="Enter the correct filename (with extension):", title="Manual Correction")
+        text = dialog.get_input()
+        if text:
+            text = text.strip()
+            # Update entry
+            original, current_name, current_full, status, options = self.scanned_files[index]
+            
+            if text not in options:
+                options.insert(0, text)
+            
+            dirname = os.path.dirname(original)
+            new_full_path = os.path.join(dirname, text)
+            
+            self.scanned_files[index] = (original, text, new_full_path, "Ready (Manual)", options)
+            self.render_current_page() # Refresh UI to show selected value
+        else:
+            self.render_current_page() # Revert selection
+
+    def handle_deep_search(self, index):
+        # AUTOMATIC Deep Search (No Dialog)
+        # We construct a robust query from the filename + context
+        
+        original = self.scanned_files[index][0]
+        filename = os.path.basename(original)
+        dirname = os.path.dirname(original)
+        parent_name = os.path.basename(dirname)
+        
+        # 1. Start with clean filename
+        base_name = os.path.splitext(filename)[0]
+        clean_name = re.sub(r"[\.\-_]", " ", base_name)
+        # Remove common scene tags
+        clean_name = re.sub(r"(1080p|720p|2160p|4k|bluray|web-dl|x264|h264|aac|mp4|mkv|hevc|dvdrip)", "", clean_name, flags=re.IGNORECASE)
+        clean_name = clean_name.strip()
+        
+        # 2. Get Media Type Context
+        type_val = self.type_var.get()
+        media_type_hint = None
+        if type_val == "Movie": media_type_hint = 'movie'
+        elif type_val == "TV": media_type_hint = 'episode'
+        
+        query = clean_name
+        
+        # 3. If TV, assume folder might be Show Name
+        # If filename is short/numeric or explicit episode code, use parent
+        is_tv_code = re.search(r"[Ss]\d+[Ee]\d+", filename)
+        if media_type_hint == 'episode' or (not media_type_hint and is_tv_code):
+             if len(clean_name) < 5 or is_tv_code:
+                 ignore_pattern = re.compile(r"^(season ?\d+|specials|featurettes|subs|subtitles|bonus|cd\d+)$", re.IGNORECASE)
+                 if not ignore_pattern.match(parent_name) and parent_name.lower() not in ["movies", "tv", "videos"]:
+                     # If the parent name is not generic, assume it's the show name
+                     # e.g. "Breaking Bad/Season 1/S01E01.mkv" -> grandparent?
+                     # Our extract_context_title deals with that. Let's just grab direct parent for now,
+                     # or maybe grandparent if parent is 'Season X'.
+                     
+                     context_title = self.renamer.extract_context_title(original)
+                     if context_title:
+                         query = f"{context_title} {clean_name}"
+                     else:
+                          query = f"{parent_name} {clean_name}"
+        
+        print(f"DEBUG: Automatic Deep Search Query: '{query}'")
+        
+        import threading
+        # Run explicitly with the derived query
+        threading.Thread(target=self._run_deep_search, args=(index, query), daemon=True).start()
+            
+    def _run_deep_search(self, index, query):
+        try:
+            print(f"DEBUG: Running deep search for '{query}'...")
+            
+            # Use current toggle setting for type hint
+            media_type_hint = None
+            type_val = self.type_var.get()
+            if type_val == "Movie": media_type_hint = 'movie'
+            elif type_val == "TV": media_type_hint = 'episode'
+            
+            # Construct a fake guess
+            fake_guess = {'title': query} 
+            if media_type_hint: fake_guess['type'] = media_type_hint
+            
+            # Use renamer instance
+            results = self.renamer.fetch_metadata(fake_guess)
+            
+            # Generate names
+            _, ext = os.path.splitext(self.scanned_files[index][0])
+            new_names = self.renamer.propose_rename(self.scanned_files[index][0], fake_guess, results, self.settings.get("rename_format"))
+            
+            # Update Main Thread
+            self.after(0, lambda: self._apply_deep_search_results(index, new_names))
+            
+        except Exception as e:
+            print(f"Deep Search Error: {e}")
+            self.after(0, self.render_current_page) # Reset
+            
+    def _apply_deep_search_results(self, index, new_names):
+        import tkinter.messagebox
+        if not new_names:
+            tkinter.messagebox.showinfo("Deep Search", "No results found.")
+            self.render_current_page()
+            return
+
+        original, current_name, current_full, status, options = self.scanned_files[index]
+        
+        # Merge new options
+        for n in new_names:
+            if n not in options:
+                options.insert(0, n)
+                
+        # Select the best one (first one)
+        best_new = new_names[0]
+        dirname = os.path.dirname(original)
+        new_full_path = os.path.join(dirname, best_new)
+        
+        self.scanned_files[index] = (original, best_new, new_full_path, "Ready (Deep Search)", options)
+        self.render_current_page()
+        tkinter.messagebox.showinfo("Deep Search", f"Found {len(new_names)} results!")
 
 
         
@@ -555,8 +749,16 @@ class AutoTitleApp(customtkinter.CTk):
             
             if not options: options = ["Unknown"]
             if new_name and new_name not in options: options.insert(0, new_name)
+            
+            # --- Interactive Options (Avoid Duplicates) ---
+            # Create a display copy so we don't pollute the data model
+            display_options = list(options)
+            if "Manual Correction..." not in display_options:
+                display_options.append("Manual Correction...")
+            if "Deep Search..." not in display_options:
+                display_options.append("Deep Search...")
                 
-            combo = customtkinter.CTkComboBox(scroll_frame, values=options, command=lambda val, idx=real_index: self.update_choice(idx, val))
+            combo = customtkinter.CTkComboBox(scroll_frame, values=display_options, command=lambda val, idx=real_index: self.update_choice(idx, val))
             if new_name: combo.set(new_name)
             else: combo.set("Unknown")
                 

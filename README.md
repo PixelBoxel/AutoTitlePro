@@ -4,11 +4,21 @@
 
 AutoTitlePro is a powerful Windows utility that automatically identifies, renames, and organizes your video files (Movies & TV Shows) using a combination of local heuristics, context inference, and IMDb metadata.
 
-**Version**: v2025.12.24.11
+**Version**: v2025.12.25.01
 
-1.  **Download**: [**Download AutoTitlePro**](https://github.com/PixelBoxel/AutoTitlePro/releases/download/v2025.12.24.11/AutoTitlePro.exe)
+1.  **Download**: [**Download AutoTitlePro**](https://github.com/PixelBoxel/AutoTitlePro/releases/download/v2025.12.25.01/AutoTitlePro.exe)
 2.  **No Installation Required**: Just double-click the `.exe` to launch.
     *   *Note: First launch might be slower as it extracts resources.*
+
+## ✨ New Features (Christmas Update)
+*   **Media Type Toggle:** Explicitly force **Movie** or **TV** mode, or let **Smart Auto** decide based on your folder names (`Movies/`, `TV Shows/`).
+*   **Deep Search Control:**
+    *   **Manual:** Light-speed local scanning.
+    *   **Auto:** Enforces strict "Title (Year)" compliance. If a movie year is missing, it forces an online search to find it.
+*   **Interactive Renaming:**
+    *   **Manual Correction:** Right-click (or select from dropdown) to manually fix a title.
+    *   **Context-Aware Deep Search:** built-in option to "Deep Search" a specific file using smart query generation (scrubs tags, uses parent folder for TV shows).
+*   **Smart Numbering Fix:** Intelligently distinguishes between "Sort Order" numbers (e.g., `01 Title` -> `Title`) and "Title Numbers" (e.g., `1917`, `10 Cloverfield Lane`).
 
 ## 🚀 Key Features
 
