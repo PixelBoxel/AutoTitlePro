@@ -4,15 +4,361 @@ from imdb import Cinemagoer
 from duckduckgo_search import DDGS
 import re
 import datetime
+import shutil
+import threading
+import traceback
+import json
+import time
+import urllib.request
 
 # Versioning: Year.Month.Day.Hour
 now = datetime.datetime.now()
 # Static version for release tracking
-__version__ = "v2025.12.25.01"
+__version__ = "v2025.12.25.02"
+
+class CacheManager:
+    def __init__(self, cache_file="movie_cache.json"):
+        self.cache_file = cache_file
+        self.movie_map = {} # Title -> {year, id, kind}
+        self.ia = Cinemagoer()
+        self.lock = threading.Lock()
+        self.loaded = False
+        self.ready_event = threading.Event()
+        
+        self.load_cache()
+
+    def load_cache(self):
+        if os.path.exists(self.cache_file):
+            try:
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    self.movie_map = json.load(f)
+                self.loaded = True
+                self.ready_event.set() # Ready immediately if we have data
+                print(f"DEBUG: Loaded {len(self.movie_map)} movies from local cache.")
+            except Exception as e:
+                print(f"Error loading cache: {e}")
+                self.movie_map = {}
+        # If cache doesn't exist, we are NOT ready until population finishes.
+
+    def wait_until_ready(self, timeout=None):
+        """Blocks until cache is loaded or populated."""
+        return self.ready_event.wait(timeout)
+
+    def save_cache(self):
+        with self.lock:
+            try:
+                with open(self.cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.movie_map, f, indent=2)
+            except Exception as e:
+                print(f"Error saving cache: {e}")
+
+    def populate_cache(self):
+        """Fetches Top 250 Movies, Popular Movies, Top 250 TV Shows, and Top 1000 Softbreak."""
+        # User requested update on every launch.
+        # We still set ready if loaded so we don't block the UI, but we proceed to fetch.
+        if self.loaded:
+             print("DEBUG: Cache loaded. Starting background refresh of data...")
+        else:
+             print("DEBUG: Cache empty. Populating...")
+        
+        # Ensure we don't block if we already have data
+        if self.loaded:
+            self.ready_event.set()
+
+        print("DEBUG: Populating local cache (Movies + TV)...")
+        
+        # Explicit save function
+        def safe_add(fetch_func, source_name, is_fallback=False, is_tv_fallback=False, is_softbreak=False):
+            try:
+                print(f"DEBUG: Fetching {source_name}...")
+                items = fetch_func()
+                if items:
+                    if is_softbreak:
+                        self._add_top1000_items(items)
+                    elif is_fallback:
+                        if is_tv_fallback:
+                            self._add_fallback_tv_items(items)
+                        else:
+                            self._add_fallback_items(items)
+                    else:
+                        self._add_items(items)
+                    print(f"DEBUG: Added {len(items)} items from {source_name}.")
+                    self.save_cache()
+                else:
+                    print(f"WARNING: {source_name} returned no items.")
+                    return False # Indicate failure
+            except Exception as e:
+                print(f"Error fetching {source_name}: {e}")
+                return False
+            return True
+
+        # 1. Top 250 Movies (Try Official, Fallback to JSON)
+        if not safe_add(self.ia.get_top250_movies, "Top 250 Movies (IMDbPY)"):
+            print("DEBUG: Official Top 250 failed. Trying Fallback JSON...")
+            safe_add(self._fetch_fallback_top250, "Top 250 Movies (GitHub JSON)", is_fallback=True)
+        
+        # 2. Popular Movies
+        if hasattr(self.ia, 'get_popular100_movies'):
+            safe_add(self.ia.get_popular100_movies, "Popular 100 Movies")
+
+        # 3. Top 250 TV
+        if not safe_add(self.ia.get_top250_tv, "Top 250 TV Shows"):
+             print("DEBUG: Official Top 250 TV failed. Trying Fallback JSON...")
+             # Note: This fallback is actually "Popular 50", but it's better than empty.
+             safe_add(self._fetch_fallback_pop_tv, "Top 50 Popular TV (GitHub JSON)", is_fallback=True, is_tv_fallback=True)
+        
+        # 4. Popular TV
+        if hasattr(self.ia, 'get_popular100_tv'):
+            safe_add(self.ia.get_popular100_tv, "Popular 100 TV Shows")
+            
+        # 5. Softbreak Top 1000 Movies (User Requested)
+        safe_add(self._fetch_top1000_movies, "Top 1000 Movies (Softbreak)", is_softbreak=True)
+
+        self.ready_event.set()
+        print(f"DEBUG: Cache initialization complete. {len(self.movie_map)} total titles cached.")
+
+    def _fetch_fallback_top250(self):
+        """Downloads raw JSON from GitHub as fallback."""
+        url = "https://raw.githubusercontent.com/movie-monk-b0t/top250/master/top250.json"
+        try:
+            with urllib.request.urlopen(url) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode())
+                    return data
+        except Exception as e:
+            print(f"Fallback fetch failed: {e}")
+        return []
+
+    def _add_fallback_items(self, items):
+        """Parses the specific JSON structure of the fallback source."""
+        with self.lock:
+            for item in items:
+                # Format: {"name": "The Godfather", "datePublished": "1972-03-24", "url": "/title/tt0068646/", "@type": "Movie"}
+                title = item.get('name')
+                
+                # Parse Year
+                year = None
+                dp = item.get('datePublished')
+                if dp:
+                    try:
+                        year = dp.split('-')[0]
+                    except: pass
+                
+                # Parse ID
+                mid = None
+                url = item.get('url') # /title/tt0068646/
+                if url:
+                    match = re.search(r'tt(\d+)', url)
+                    if match:
+                        mid = match.group(1)
+                
+                kind = 'movie'
+                if item.get('@type') == 'TVSeries': kind = 'tv series'
+                
+                if title and mid:
+                    self._add_single_entry(title, year, mid, kind)
+
+    def _fetch_fallback_pop_tv(self):
+        """Downloads Top 50 TV Shows raw JSON from GitHub as fallback."""
+        url = "https://raw.githubusercontent.com/crazyuploader/IMDb_Top_50/main/data/top50/shows.json"
+        try:
+            with urllib.request.urlopen(url) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode())
+                    return data
+        except Exception as e:
+            print(f"Fallback TV fetch failed: {e}")
+        return []
+
+    def _add_fallback_tv_items(self, items):
+        """Parses the specific JSON structure of the crazyuploader source."""
+        # Format: {"Show Name": "The Last of Us", "Link": "https://www.imdb.com/title/tt3581920/"}
+        with self.lock:
+            for item in items:
+                title = item.get('Show Name')
+                link = item.get('Link')
+                
+                mid = None
+                if link:
+                    match = re.search(r'tt(\d+)', link)
+                    if match:
+                        mid = match.group(1)
+                
+                if title and mid:
+                    # We don't have year, but better than nothing.
+                    self._add_single_entry(title, None, mid, "tv series")
+
+    def _fetch_top1000_movies(self):
+        """Downloads Softbreak Top 1000 Movies raw JSON."""
+        url = "https://raw.githubusercontent.com/softbreak/IMDB-Top-1000-Json/main/movies.json"
+        try:
+            with urllib.request.urlopen(url) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode())
+                    return data
+        except Exception as e:
+             print(f"Top 1000 fetch failed: {e}")
+        return []
+
+    def _add_top1000_items(self, items):
+        """Parses the Softbreak JSON structure."""
+        # Format: {"Id": 243, "Title": "Inception", "Year": 2010, ...}
+        with self.lock:
+            for item in items:
+                title = item.get('Title')
+                year = item.get('Year')
+                rank_id = item.get('Id')
+                
+                # We don't have a real IMDb ID, so we use a placeholder.
+                # This is sufficient for offline renaming but won't support deep metadata lookups.
+                mid = f"sb_{rank_id}" if rank_id else None
+                
+                if title:
+                   # Use 'movie' kind as default for this list
+                   self._add_single_entry(title, year, mid, "movie")
+
+    def _add_items(self, items):
+        """Parses IMDbPY objects."""
+        with self.lock:
+            for m in items:
+                title = m.get('title')
+                year = m.get('year')
+                kind = m.get('kind')
+                mid = m.movieID
+                
+                if title:
+                    self._add_single_entry(title, year, mid, kind)
+    
+    def _add_single_entry(self, title, year, mid, kind):
+        key = self._normalize(title)
+        if key not in self.movie_map:
+             self.movie_map[key] = []
+        
+        entry = {
+            'title': title,
+            'year': year,
+            'id': mid,
+            'kind': kind or 'unknown'
+        }
+        
+        # Dup check
+        exists = False
+        for existing in self.movie_map[key]:
+            if existing.get('id') == mid:
+                exists = True
+                break
+        
+        if not exists:
+            self.movie_map[key].append(entry)
+
+    def _normalize(self, title):
+        # Remove punctuation, extra spaces, lower case
+        clean = str(title).strip().lower()
+        clean = re.sub(r'[^\w\s]', '', clean)
+        clean = re.sub(r'\s+', ' ', clean)
+        return clean
+
+    def search(self, title, year=None, kind_filter=None):
+        """Local search. Returns list of Cinemagoer-like Movie objects."""
+        if not title: return None
+        
+        key = self._normalize(title)
+        candidates = self.movie_map.get(key)
+        
+        if not candidates:
+             return None
+             
+        best_match = None
+        
+        # Filter logic
+        filtered = []
+        for c in candidates:
+            # Type Filter
+            if kind_filter:
+                c_kind = c.get('kind', '')
+                if kind_filter == 'movie' and c_kind not in ['movie', 'tv movie', 'video movie']:
+                    continue
+                if kind_filter == 'episode' and c_kind not in ['tv series', 'tv mini series']:
+                     # Note: We cache SHOWS, but incoming guess is 'episode'
+                     # So we want to match the Show Title
+                     pass
+            
+            # Year Filter (Soft)
+            score = 0
+            if year and c.get('year'):
+                try:
+                    diff = abs(int(c['year']) - int(year))
+                    if diff == 0: score = 10
+                    elif diff == 1: score = 8
+                    elif diff <= 2: score = 5
+                    else: score = 1
+                except: pass
+            else:
+                score = 5 # No year provided, neutral match
+            
+            filtered.append((score, c))
+            
+        filtered.sort(key=lambda x: x[0], reverse=True)
+        
+        if not filtered:
+            return None
+            
+        # Return top matches converted to Objects
+        results = []
+        for score, data in filtered[:3]:
+             from imdb.Movie import Movie
+             m = Movie(_movieID=data['id'], isSameTitle=True)
+             m['title'] = data['title']
+             if data['year']: m['year'] = data['year']
+             if data['kind']: m['kind'] = data['kind']
+             results.append(m)
+             
+        return results
+
+    def add_to_cache(self, movie_obj):
+        """Adds a single Cinemagoer Movie object to the local cache and saves."""
+        if not movie_obj: return
+        
+        title = movie_obj.get('title')
+        mid = movie_obj.movieID
+        year = movie_obj.get('year')
+        kind = movie_obj.get('kind', 'unknown')
+        
+        if not title or not mid: return
+        
+        # We need to map kind properly if it's missing or vague
+        # If adding from a TV find, let's trust it
+        
+        key = self._normalize(title)
+        
+        with self.lock:
+            if key not in self.movie_map:
+                self.movie_map[key] = []
+                
+            entry = {
+                'title': title,
+                'year': year,
+                'id': mid,
+                'kind': kind
+            }
+            
+            # Check dup
+            exists = False
+            for existing in self.movie_map[key]:
+                if existing.get('id') == mid:
+                    exists = True
+                    break
+            
+            if not exists:
+                self.movie_map[key].append(entry)
+                # print(f"DEBUG: Learnt new title: '{title}' ({year})")
+                self.save_cache()
 
 class AutoRenamer:
     def __init__(self):
         self.ia = Cinemagoer()
+        self.cache = CacheManager()
+        threading.Thread(target=self.cache.populate_cache, daemon=True).start()
 
     def scan_directory(self, path, progress_callback=None):
         """Recursively finds video files in the given directory."""
@@ -48,21 +394,67 @@ class AutoRenamer:
                 
         return guess
 
-    def fetch_metadata(self, guess, file_path=None):
+    def sanitize_title(self, text):
+        """
+        Aggressively strips common scene tags from a string to get a clean title.
+        """
+        if not text: return ""
+        
+        clean = text
+        
+        # 1. Remove Release Groups (heuristics: "-Group" at end) BEFORE stripping hyphens
+        clean = re.sub(r"\-[a-zA-Z0-9]+$", "", clean)
+        
+        # 2. Replace dots/underscores/dashes with spaces
+        clean = re.sub(r"[\.\-_]", " ", clean)
+        
+        # 3. List of tags to strip. 
+        # INCLUDES SPACED VARIANTS because we just replaced separators with spaces.
+        tags = [
+            r"1080p", r"720p", r"2160p", r"480p", r"4k", r"8k",
+            r"bluray", r"blu ray", r"dvd", r"dvdrip", r"dvd rip", 
+            r"web", r"web dl", r"web rip", r"webrip", r"webdl",
+            r"hdtv", r"remux", r"bdrip", r"brip",
+            r"x264", r"x265", r"h264", r"h265", r"h 264", r"h 265", r"hevc", r"avc", r"divx", r"xvid",
+            r"aac", r"ac3", r"eac3", r"dts", r"truehd", r"flac", r"mp3", r"ogg", r"wma", 
+            r"dd5\.1", r"dd5 1", r"ddp5\.1", r"ddp5 1", r"dd", r"ddp", r"atmos",
+            r"5\.1", r"5 1", r"7\.1", r"7 1", r"2\.0", r"2 0",
+            r"hdr", r"10bit", r"12bit", 
+            r"extended", r"uncut", r"directors cut", r"repack", r"proper",
+            r"mp4", r"mkv", r"avi", r"wmv"
+        ]
+        
+        regex = r"\b(" + "|".join(tags) + r")\b"
+        clean = re.sub(regex, "", clean, flags=re.IGNORECASE)
+        
+        # 4. Handle patterns like "AAC5.1" (no boundary) or "DD5.1"
+        # CRITICAL FIX: Ensure 'dd' has a boundary start, or is followed by digit
+        clean = re.sub(r"\b(aac|ac3|dts|dd|ddp)[\s\.]*\d+", "", clean, flags=re.IGNORECASE)
+        
+        # 5. Clean up multiple spaces
+        clean = re.sub(r"\s+", " ", clean).strip()
+        
+        return clean
+
+    def fetch_metadata(self, guess, file_path=None, offline_only=False):
         """Queries IMDb via DuckDuckGo + Cinemagoer. Returns list of matches."""
         
         title = guess.get('title')
         year = guess.get('year')
         media_type = guess.get('type')
         
+        # ... logic ...
         GENERIC_FOLDERS = {
             "movies", "films", "downloads", "completed", "video", "videos", 
             "tv", "tv shows", "tv series", "plex", "media", "unsorted", "library", "unknown"
         }
 
         # 1. Sanitize 'guess' title immediately
+        if title:
+             title = self.sanitize_title(title)
+        
         if title and title.strip().lower() in GENERIC_FOLDERS:
-            print(f"DEBUG: 'guessit' returned generic title '{title}'. Discarding.")
+            # print(f"DEBUG: 'guessit' returned generic title '{title}'. Discarding.")
             title = None 
 
         # 2. Fallback: context inference
@@ -71,13 +463,10 @@ class AutoRenamer:
             clean_parent = parent_name.strip().lower()
             
             if clean_parent in GENERIC_FOLDERS:
-                print(f"DEBUG: Generic parent '{parent_name}'. Trying raw filename.")
+                # print(f"DEBUG: Generic parent '{parent_name}'. Trying raw filename.")
                 # Try raw filename
                 filename_base = os.path.splitext(os.path.basename(file_path))[0]
-                # Cleanup common scene tags
-                search_term = re.sub(r"[\.\-_]", " ", filename_base)
-                search_term = re.sub(r"(1080p|720p|2160p|4k|bluray|web-dl|x264|h264|aac|mp4|mkv)", "", search_term, flags=re.IGNORECASE)
-                title = search_term.strip()
+                title = self.sanitize_title(filename_base)
             else:
                 if re.match(r"^(Season|S)\s*\d+$", parent_name, re.IGNORECASE):
                      grandparent = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
@@ -89,41 +478,37 @@ class AutoRenamer:
         
         if not title:
              # Final Hail Mary: Raw filename
-             title = os.path.splitext(os.path.basename(file_path))[0].replace(".", " ")
+             base = os.path.splitext(os.path.basename(file_path))[0]
+             title = self.sanitize_title(base)
+
+        # --- LOCAL CACHE CHECK ---
+        if title:
+            # Map guessit type to IMDb kind
+            k_filter = None
+            if media_type == 'movie': k_filter = 'movie'
+            elif media_type == 'episode': k_filter = 'episode' # Map to TV Series check
+            
+            cached_matches = self.cache.search(title, year, kind_filter=k_filter)
+            if cached_matches:
+                print(f"DEBUG: Using cached result for '{title}'")
+                return cached_matches
+                
+        # --- OFFLINE EXIT ---
+        if offline_only:
+            # If we didn't find it in cache, we stop here.
+            return []
 
         queries_to_try = []
-        
-        # --- Handle Leading Sort Numbers (e.g. "01 A Nightmare") ---
-        # Heuristic: Starts with 0, followed by digit.
-        # This avoids stripping "10 Cloverfield" or "1917" or "2001".
-        clean_title_candidate = None
         if title:
-            # Check for "01 Title", "01. Title", "01 - Title"
-            match = re.match(r"^0\d+[\s\.\-_]+(.+)", title)
-            if match:
-                clean_title_candidate = match.group(1).strip()
-                print(f"DEBUG: derived clean title '{clean_title_candidate}' from '{title}'")
-
-        base_query = f"{title}"
-        if year: base_query += f" {year}"
-        
-        # Priority 1: Specific type
-        if media_type == 'episode':
-            queries_to_try.append(base_query + " tv series")
-            if clean_title_candidate: queries_to_try.append(f"{clean_title_candidate} {year} tv series" if year else f"{clean_title_candidate} tv series")
-                
-        elif media_type == 'movie':
-            queries_to_try.append(base_query + " movie")
-            if clean_title_candidate: queries_to_try.append(f"{clean_title_candidate} {year} movie" if year else f"{clean_title_candidate} movie")
+            # Try combining with Year/Type for precision
+            if year:
+                queries_to_try.append(f"{title} {year} {media_type if media_type else 'movie'}")
             
-        # Priority 2: Base query
-        queries_to_try.append(base_query)
-        if clean_title_candidate: queries_to_try.append(f"{clean_title_candidate} {year}" if year else clean_title_candidate)
-        
-        # Add loose filename search if different
-        loose = os.path.splitext(os.path.basename(file_path))[0].replace(".", " ")
-        if loose != title: queries_to_try.append(loose)
-
+            if media_type:
+                 queries_to_try.append(f"{title} {media_type}")
+                 
+            queries_to_try.append(title)
+            
         candidates = []
         found_ids = set()
 
@@ -150,6 +535,12 @@ class AutoRenamer:
                                     movie = self.ia.get_movie(clean_id)
                                     if movie:
                                         candidates.append(movie)
+                                        # --- CACHE ON LEARN ---
+                                        # If we successfully found a movie online that wasn't in cache, add it.
+                                        # Note: This adds *candidates*. Ideally we only add the *chosen* one?
+                                        # But for search cache, knowing candidates is good too.
+                                        # Let's add all valid metadata found.
+                                        self.cache.add_to_cache(movie)
                                 except Exception as e:
                                     print(f"Error fetching ID {imdb_id}: {e}")
             
@@ -158,6 +549,33 @@ class AutoRenamer:
         except Exception as e:
             print(f"Error fetching metadata for {title}: {e}")
             return []
+
+    def find_cached_match_raw(self, filename):
+        """
+        Attempts to find a cache match using the raw filename (sanitized).
+        Returns a Movie object or None.
+        """
+        base = os.path.splitext(filename)[0]
+        # Use sanitize_title to strip scene tags
+        clean_name = self.sanitize_title(base)
+        
+        # Heuristic: If name is too short, skip raw check (too many false positives?)
+        if len(clean_name) < 3:
+            return None
+            
+        # Search cache
+        # We don't have year or kind from raw filename reliably, so we search broad.
+        # But we can try to extract a year using regex to help strictness.
+        year_match = re.search(r'\b(19|20)\d{2}\b', clean_name)
+        year = year_match.group(0) if year_match else None
+        
+        matches = self.cache.search(clean_name, year=year)
+        if matches:
+            # Return best match
+            m = matches[0]
+            m.source = "DB"
+            return m
+        return None
 
     def propose_rename(self, file_path, guess, metadata_list, format_string=None):
         """Generates a list of new filenames based on metadata candidates."""
@@ -312,27 +730,31 @@ class AutoRenamer:
         return result
 
     def generate_name_from_guess(self, guess, extension, format_string=None):
-        """
-        Attempts to generate a clean filename purely from the guessit result.
-        Returns a string or None if critical info is missing.
-        """
-        if not guess or 'title' not in guess:
+        """Generates a formatted filename from guessit dict."""
+        if not guess: return None
+        
+        title = guess.get('title')
+        if not title: return None
+        
+        # --- CRITICAL CONFIDENCE CHECK ---
+        # If the title still contains tech specs, it's a bad guess.
+        # But wait, sanitize_title STRIPS them.
+        # So let's sanitize. If the result is empty or weird, reject.
+        clean_title = self.sanitize_title(title)
+        if not clean_title or len(clean_title) < 2:
             return None
             
-        title = guess['title']
-        # Enforce Title Case for consistency
-        title = title.strip().title()
-        
-        # Determine type
+        # Use clean title for generation
+        title = clean_title.title()
+
         media_type = guess.get('type')
-        
         if media_type == 'episode':
             season = guess.get('season')
             episode = guess.get('episode')
             
             if season is not None and episode is not None:
                 if isinstance(season, list): season = season[0]
-                if isinstance(episode, list): episode = episode[0]
+                if isinstance(episode, list): episode[0]
                 
                 # Use format string if provided
                 if format_string:
@@ -372,12 +794,7 @@ class AutoRenamer:
             old_base = os.path.splitext(old_path)[0]
             new_base = os.path.splitext(new_path)[0]
             
-            dirname = os.path.dirname(old_path)
-            
-            # Check for suffixes (case-insensitive check would be better but simple suffix loop works for now)
-            # Actually, standard OS filesystems are tricky.
-            # Best way: listdir and check startswith? No, too slow.
-            # Just check the set.
+            # Check standard extensions
             for ext in COMPANION_EXTS:
                 old_comp = old_base + ext
                 if os.path.exists(old_comp):
@@ -387,7 +804,6 @@ class AutoRenamer:
                         print(f"DEBUG: Renamed companion {old_comp} -> {new_comp}")
                     except OSError as e:
                         print(f"Error renaming companion {old_comp}: {e}")
-            
             return True
         except OSError as e:
             print(f"Error renaming {old_path} to {new_path}: {e}")
@@ -396,79 +812,23 @@ class AutoRenamer:
     def organize_files(self, scanned_files, scan_root, settings=None):
         """
         Restructures folders to ensure 'Show Name/Show Name - Season X/File' hierarchy.
-        Uses scan_root and 'Show Name' anchors to flatten recursive/messy structures.
+        Now supports standardizing existing movie folders ("renaming parent") to keep companions together.
         """
         if settings is None: settings = {}
         
         organize_enabled = settings.get("organize", True)
-        title_case_enabled = settings.get("title_case", True)
         
         # If organization is disabled, we do nothing but return empty stats
         if not organize_enabled:
             return {"status": "Organization Disabled"}
             
         stats = {"folders_created": 0, "folders_renamed": 0, "files_moved": 0, "folders_moved": 0}
-        COMPANION_EXTS = {'.srt', '.sub', '.idx', '.vtt', '.ssa', '.ass', '.nfo', '.jpg', '.jpeg', '.png', '.txt'}
         
-        # Set of source directories we have moved files FROM, to clean up later
-        cleanup_candidates = set()
+        # 1. Analyze Directory Structure
+        # Map ParentDir -> List of (original_path, new_path)
+        dir_contents = {}
         
-        # Optimization: Cache root children for fast lookup in batch mode
-        # Map lower_case -> actual_name
-        root_children_cache = {}
-        try:
-            if os.path.exists(scan_root):
-                for child in os.listdir(scan_root):
-                    root_children_cache[child.lower()] = child
-        except OSError:
-            pass
-
-        # Track directory renames to fix 'abs_current' for subsequent files
-        # List of (old_abs_path, new_abs_path)
-        path_replacements = []
-
         for item in scanned_files:
-            original, new_name, current_path, status, _ = item
-            
-            valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)", "Skipped Rename"]
-            if status not in valid_statuses or not current_path:
-                continue
-                
-            # Resolve current path based on previous directory renames
-            abs_current = os.path.abspath(current_path)
-            for old_p, new_p in path_replacements:
-                if abs_current == old_p or abs_current.startswith(old_p + os.sep):
-                     rel = os.path.relpath(abs_current, old_p)
-                     abs_current = os.path.join(new_p, rel)
-            
-            if not os.path.exists(abs_current):
-                # If resolving didn't help (or file moved/deleted externally), skip
-                print(f"DEBUG: File not found at {abs_current}, skipping.")
-                continue
-
-            filename = os.path.basename(abs_current)
-            # Safe regex for cleaned files
-            match = re.search(r"^(.*?) - S(\d+)E\d+", filename)
-            if not match:
-                continue
-            
-            raw_show_name = match.group(1)
-            season_num = int(match.group(2))
-            
-            # Enforce Title Case for Folders (Uniformity)
-            show_name = raw_show_name.strip()
-            if title_case_enabled:
-                show_name = show_name.title()
-            
-            target_season_dir_name = f"{show_name} - Season {season_num}"
-            target_show_dir_name = show_name
-            
-            # --- Determine Base/Anchor (Strict Flattening Logic) ---
-            # We want to enforce that the Show Folder is either the Root itself (if selected)
-            # OR a direct child of the Root. 
-            # This bypasses all deep/recursive nesting.
-
-            # Normalize paths
             try:
                 abs_root = os.path.abspath(scan_root)
             except Exception:
@@ -780,218 +1140,93 @@ class AutoRenamer:
                          
         return updated_files
 
+ 
     def preview_folder_changes(self, scanned_files, scan_root, settings=None):
         """
-        Simulates the organization process to generate a preview of folder operations.
-        Returns a list of dicts:
-        [
-            {"action": "Rename Folder", "src": "...", "dst": "..."},
-            {"action": "Create Folder", "src": None, "dst": "..."},
-            {"action": "Move File", "src": "...", "dst": "...", "file": "video.mkv"},
-            ...
-        ]
+        Generates a list of planned folder operations for UI preview.
+        Supports Movies (Rename Parent) and TV Shows (Structure).
         """
         if settings is None: settings = {}
-        # Make a copy of scanned_files to not mutate originals (though tuples are immutable)
-        # We need to simulate the state tracking
-        
-        # We REUSE the logic from organize_files but without os.rename
-        # This is tricky without code duplication. 
-        # Ideally organize_files should take a dry_run flag.
-        
-        # For now, let's implement a lighter version that predicts based on the same rules.
-        
-        preview_ops = []
         organize_enabled = settings.get("organize", True)
-        title_case_enabled = settings.get("title_case", True)
-        
-        if not organize_enabled:
-            return []
+        if not organize_enabled: return []
 
-        # We need to simulate the path replacements
-        path_replacements = [] # (old, new)
+        preview_ops = []
         
-        # We need to simulate created dirs to avoid duplicate "Create" ops
-        virtual_dirs = set()
-        if os.path.exists(scan_root):
-             virtual_dirs.add(os.path.abspath(scan_root))
-             
-        # Root children cache simulation
-        root_children_lower = {}
-        try:
-            if os.path.exists(scan_root):
-                for child in os.listdir(scan_root):
-                    root_children_lower[child.lower()] = child
-        except OSError: pass
-
-        # We assume processing order is same as list
+        # Group by Parent Directory to detect "Movie Folder" candidates
+        dir_contents = {}
         for item in scanned_files:
-            original, new_name, current_path, status, _ = item
+            original = item[0]
+            if "Skipped" in item[3] or "Error" in item[3]: continue
             
-            valid_statuses = ["Renamed", "File OK", "Ready (Local)", "Ready (Organize Only)", "Skipped Rename"]
-            if status not in valid_statuses:
-                continue
+            # Use full_new_path if set
+            full_new_path = item[2]
+            if not full_new_path: continue
             
-            # Resolve basics
-            if current_path: 
-                abs_current = os.path.abspath(current_path)
-            else:
-                abs_current = os.path.abspath(original)
+            parent = os.path.dirname(original)
+            if parent not in dir_contents: dir_contents[parent] = []
+            dir_contents[parent].append(item)
 
-            # --- SIMULATE PATH RESOLUTION ---
-            for old_p, new_p in path_replacements:
-                if abs_current == old_p or abs_current.startswith(old_p + os.sep):
-                     rel = os.path.relpath(abs_current, old_p)
-                     abs_current = os.path.join(new_p, rel)
-            
-            filename = os.path.basename(abs_current)
-            match = re.search(r"^(.*?) - S(\d+)E\d+", filename)
-            if not match: continue
-            
-            raw_show_name = match.group(1)
-            season_num = int(match.group(2))
-            
-            show_name = raw_show_name.strip()
-            if title_case_enabled: show_name = show_name.title()
-            
-            target_season_dir_name = f"{show_name} - Season {season_num}"
-            
-            # --- ROOT/SHOW FOLDER LOGIC ---
-            try:
-                abs_root = os.path.abspath(scan_root)
-                # Resolve root if it was renamed in sim?
-                # Actually strict flattening logic renames root/parent once.
-                # We need to track that.
-                
-                # Check simulation cache for root updates
-                for old_p, new_p in path_replacements:
-                     if abs_root == old_p:
-                         abs_root = new_p
-            except: continue
-            
-            root_name = os.path.basename(abs_root)
-            final_show_dir = None
-            
-            # Case 1: Root IS Show
-            if root_name.lower() == show_name.lower():
-                if root_name != show_name:
-                    # Simulation: "Rename Root"
-                    # Only do this once
-                    new_root = os.path.join(os.path.dirname(abs_root), show_name)
-                    if abs_root not in [x[0] for x in path_replacements]: 
-                        preview_ops.append({
-                            "action": "Rename Folder", 
-                            "src": abs_root, 
-                            "dst": new_root,
-                            "reason": "Fix Case"
-                        })
-                        path_replacements.append((abs_root, new_root))
-                        abs_root = new_root
-                        scan_root = new_root # Update local ref
-                        
-                        # Update abs_current
-                        # (simplified, assumed strictly strictly strictly aligned)
-                        pass
-                final_show_dir = abs_root
-            else:
-                 # Case 3: Inside Show (Parent check) - Priority over Case 2
-                parent_dir = os.path.dirname(abs_root)
-                parent_name = os.path.basename(parent_dir)
-                
-                if parent_name.lower() == show_name.lower():
-                     if parent_name != show_name:
-                         grandparent = os.path.dirname(parent_dir)
-                         new_parent = os.path.join(grandparent, show_name)
-                         if parent_dir not in [x[0] for x in path_replacements]:
-                             preview_ops.append({
-                                "action": "Rename Folder",
-                                "src": parent_dir,
-                                "dst": new_parent,
-                                "reason": "Fix Parent Case"
-                             })
-                             path_replacements.append((parent_dir, new_parent))
-                             parent_dir = new_parent
-                             abs_root = os.path.join(new_parent, root_name)
-                     final_show_dir = parent_dir
-                else:
-                    # Case 2: Child of Root
-                    existing_child = root_children_lower.get(show_name.lower())
-                    
-                    if existing_child:
-                        child_path = os.path.join(abs_root, existing_child)
-                        if existing_child != show_name:
-                             final_path = os.path.join(abs_root, show_name)
-                             # Check if we already planned to rename this
-                             if child_path not in [x[0] for x in path_replacements]:
-                                 preview_ops.append({
-                                    "action": "Rename Folder",
-                                    "src": child_path,
-                                    "dst": final_path,
-                                    "reason": "Fix Case"
-                                 })
-                                 path_replacements.append((child_path, final_path))
-                                 root_children_lower[show_name.lower()] = show_name # update cache
-                             final_show_dir = final_path
-                        else:
-                             final_show_dir = child_path
-                    else:
-                        # Create new show folder
-                        final_show_dir = os.path.join(abs_root, show_name)
-                        if final_show_dir not in virtual_dirs and not os.path.exists(final_show_dir):
-                            preview_ops.append({
-                                "action": "Create Folder",
-                                "src": None,
-                                "dst": final_show_dir,
-                                "reason": "New Show"
-                            })
-                            virtual_dirs.add(final_show_dir)
-                            root_children_lower[show_name.lower()] = show_name
-
-            # --- SEASON FOLDER LOGIC ---
-            # Get Folder Format
-            folder_fmt = settings.get("folder_format")
-            if folder_fmt:
-                 folder_fmt = "".join([c for c in folder_fmt if c not in r':*?"<>|'])
-                 data = {'title': show_name, 'season': season_num, 'episode': 0, 'year': ''}
-                 target_season_dir_name = self.apply_format(folder_fmt, data)
-            else:
-                 target_season_dir_name = f"{show_name} - Season {season_num}"
-
-            final_season_dir = os.path.join(final_show_dir, target_season_dir_name)
-            
-            # Check for existing season folder (to rename)
-            # This is hard to simulate perfectly without listing dirs, 
-            # but we can assume if we are moving from a folder named "season 1" it might be it.
-            # For preview, we mostly care about Creations and major Renames.
-            
-            if final_season_dir not in virtual_dirs and not os.path.exists(final_season_dir):
-                 # We might be renaming an existing one?
-                 # Simplifying assumption for preview: If it doesn't exist, we Create it.
-                 # Unless we detect a case mismatch on disk (too expensive to scan every time?)
-                 preview_ops.append({
-                    "action": "Create Folder",
-                    "src": None,
-                    "dst": final_season_dir,
-                    "reason": "Season Folder"
-                 })
-                 virtual_dirs.add(final_season_dir)
+        # Track renames to avoid confusion
+        processed_folders = set()
+        
+        for parent_dir, items in dir_contents.items():
+             if parent_dir in processed_folders: continue
+             processed_folders.add(parent_dir)
+             
+             is_root = os.path.normpath(parent_dir) == os.path.normpath(scan_root)
+             
+             # MOVIE/SINGLE VIDEO FOLDER LOGIC
+             # If folder has 1 video file in our list, and we are organizing...
+             if not is_root and len(items) == 1:
+                 item = items[0]
+                 original = item[0]
+                 full_new_path = item[2]
                  
-            # --- FILE MOVE LOGIC ---
-            final_file_path = os.path.join(final_season_dir, filename)
-            if abs_current != final_file_path:
-                # Dedupe sim moves?
-                pass
-                # We don't list every file move in Folder Preview tab, that's too much noise?
-                # The user asked for "Folder renaming tab".
-                # Let's focus on Folder Ops.
-                
-        # Deduplicate ops just in case
-        unique_ops = []
-        seen_ops = set()
-        for op in preview_ops:
-            k = (op['action'], op['src'], op['dst'])
-            if k not in seen_ops:
-                unique_ops.append(op)
-                seen_ops.add(k)
-                
-        return unique_ops
+                 target_dir = os.path.dirname(full_new_path)
+                 
+                 # If we are changing the folder name
+                 if os.path.normpath(parent_dir) != os.path.normpath(target_dir):
+                     
+                     # Heuristic: Are we moving to a sibling folder? (Rename)
+                     # Or moving far away? (Move)
+                     # Assuming scan_root is common ancestor.
+                     
+                     # Simple Preview Logic:
+                     # If target doesn't exist, we propose "Rename Folder".
+                     if not os.path.exists(target_dir):
+                         preview_ops.append({
+                             "action": "Rename Folder",
+                             "src": parent_dir,
+                             "dst": target_dir,
+                             "reason": "Match Movie Title"
+                         })
+                     else:
+                         # Target exists, so it's a Merge/Move files
+                         preview_ops.append({
+                             "action": "Move File",
+                             "src": original,
+                             "dst": full_new_path,
+                             "reason": "Merge into existing folder"
+                         })
+             
+             else:
+                 # Multiple files or Root -> Likely TV Show or Messy Folder
+                 # For Preview, we can just show "Organize x Files" or assume TV Logic?
+                 # Existing TV logic was complex. Let's simplify for Preview:
+                 # Just show distinct destination folders being created.
+                 
+                 dest_folders = set()
+                 for it in items:
+                     fp = it[2]
+                     if fp: dest_folders.add(os.path.dirname(fp))
+                 
+                 for d in dest_folders:
+                     if not os.path.exists(d):
+                          preview_ops.append({
+                             "action": "Create Folder",
+                             "src": None,
+                             "dst": d,
+                             "reason": "New Structure"
+                         })
+
+        return preview_ops

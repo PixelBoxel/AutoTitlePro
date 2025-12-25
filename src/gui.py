@@ -62,6 +62,37 @@ class Watchdog:
                 traceback.print_stack(frame, file=f)
                 f.write("-" * 20 + "\n")
 
+class ToolTip(object):
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.id = None
+        self.x = self.y = 0
+        self.widget.bind("<Enter>", self.showtip)
+        self.widget.bind("<Leave>", self.hidetip)
+
+    def showtip(self, event=None):
+        "Display text in tooltip window"
+        self.text = self.widget.tooltip_text if hasattr(self.widget, 'tooltip_text') else self.text
+        if self.tipwindow or not self.text:
+            return
+        x, y, cx, cy = self.widget.bbox("insert")
+        x = x + self.widget.winfo_rootx() + 25
+        y = y + cy + self.widget.winfo_rooty() + 25
+        self.tipwindow = tw = tkinter.Toplevel(self.widget)
+        tw.wm_overrideredirect(1)
+        tw.wm_geometry("+%d+%d" % (x, y))
+        
+        label = customtkinter.CTkLabel(tw, text=self.text, corner_radius=6, fg_color="#333333", text_color="white", padx=10, pady=5)
+        label.pack(ipadx=1)
+        
+    def hidetip(self, event=None):
+        tw = self.tipwindow
+        self.tipwindow = None
+        if tw:
+            tw.destroy()
+
 class AutoTitleApp(customtkinter.CTk):
     def __init__(self):
         super().__init__()
@@ -123,11 +154,16 @@ class AutoTitleApp(customtkinter.CTk):
         self.type_label.pack(side="right", padx=(10, 5))
         
         # Deep Search Mode Toggle
-        self.search_mode_var = customtkinter.StringVar(value="Manual")
-        self.search_mode_switch = customtkinter.CTkSegmentedButton(self.header_frame, values=["Manual", "Auto"], variable=self.search_mode_var)
+        self.search_mode_var = customtkinter.StringVar(value="Auto")
+        self.search_mode_switch = customtkinter.CTkSegmentedButton(self.header_frame, values=["Fast", "Auto", "Deep"], variable=self.search_mode_var)
         self.search_mode_switch.pack(side="right", padx=10)
-        self.search_mode_lbl = customtkinter.CTkLabel(self.header_frame, text="Deep Search:", font=customtkinter.CTkFont(size=12, weight="bold"))
+        self.search_mode_lbl = customtkinter.CTkLabel(self.header_frame, text="Deep Search (?):", font=customtkinter.CTkFont(size=12, weight="bold"))
         self.search_mode_lbl.pack(side="right", padx=(10, 5))
+
+        # Tooltip for Deep Search logic
+        # Attached to Label because CTkSegmentedButton doesn't support bind well
+        self.search_mode_lbl.tooltip_text = "Fast: Offline only\nAuto: Online fallback\nDeep: Online Driven"
+        ToolTip(self.search_mode_lbl, self.search_mode_lbl.tooltip_text)
 
         # Settings Storage (Default values)
         self.settings = {
@@ -304,6 +340,15 @@ class AutoTitleApp(customtkinter.CTk):
     def scan_thread(self, directory):
         try:
             print(f"DEBUG: Starting scan of {directory}")
+            
+            # --- BLOCK UNTIL CACHE READY ---
+            if not self.renamer.cache.loaded: # Optimization: check loaded boolean first
+                 self.update_progress_label("Initializing Movie Database... (First Run)")
+                 # Wait up to 60s
+                 ready = self.renamer.cache.wait_until_ready(timeout=60)
+                 if not ready:
+                     print("WARNING: Cache initialization timed out or failed. Proceeding anyway.")
+
             # Fix: Pass watchdog kick callback to prevent timeout during long file enumeration
             kick_callback = lambda: self.watchdog.kick() if hasattr(self, 'watchdog') else None
             files = self.renamer.scan_directory(directory, progress_callback=kick_callback)
@@ -322,7 +367,10 @@ class AutoTitleApp(customtkinter.CTk):
             if type_val == "Movie": base_override = 'movie'
             elif type_val == "TV": base_override = 'episode'
             
-            print(f"DEBUG: Starting scan of {directory} with mode={type_val}")
+            # Get Deep Search Mode
+            deep_search_mode = self.search_mode_var.get()
+            
+            print(f"DEBUG: Starting scan of {directory} with mode={type_val}, search={deep_search_mode}")
             
             for i, file_path in enumerate(files):
                 # Watchdog Kick (I'm alive!)
@@ -354,26 +402,51 @@ class AutoTitleApp(customtkinter.CTk):
                 context_title = self.renamer.extract_context_title(file_path)
                 if context_title:
                     filename_title = guess.get('title', '')
-                    # Heuristic: If context title is significantly different or filename title is very short
-                    # Debug print reduced to avoid spam on 3800 files, or keep it? Keep it for now.
-                    # print(f"DEBUG: Context title found: '{context_title}'")
                     guess['title'] = context_title
                 
-                    guess['title'] = context_title
+                # --- STRATEGY: CHECK LOCAL CACHE ("DB") BEFORE ANYTHING ELSE ---
+                # As requested: "check the locl cache before going to guess it"
+                # We interpret this as: Try Raw Filename against Cache.
+                # If that hits, we TRUST the DB title/year, but we stick with Guessit's S/E.
                 
+                raw_match = self.renamer.find_cached_match_raw(filename)
+                
+                pre_matched_metadata = None
+                
+                if raw_match:
+                     print(f"DEBUG: Raw filename matched in Cache: {raw_match['title']}")
+                     # Override guess title/year with the authoritative DB info
+                     guess['title'] = raw_match['title']
+                     if raw_match.get('year'): 
+                         guess['year'] = raw_match['year']
+                     
+                     # We treat this as our metadata result
+                     pre_matched_metadata = [raw_match]
+                     
                 # --- MANDATORY YEAR CHECK (Movies) ---
                 # If it's a movie and year is missing, and Deep Search is Auto, skip Fast Path.
+                # If Fast Mode (Offline), we CANNOT skip local, we must try best effort.
                 skip_local = False
-                deep_search_mode = self.search_mode_var.get()
                 is_movie = (current_override == 'movie') or (guess.get('type') == 'movie')
                 
-                if is_movie and not guess.get('year') and deep_search_mode == "Auto":
-                     print(f"DEBUG: Missing year for movie '{filename}', forcing Deep Search.")
-                     skip_local = True
+                if is_movie and not guess.get('year'):
+                     if deep_search_mode == "Deep": # Was "Auto"
+                         # If we already matched raw cache, we have year hopefully.
+                         if not pre_matched_metadata:
+                             print(f"DEBUG: Missing year for movie '{filename}', forcing Deep Search.")
+                             skip_local = True
+                     elif deep_search_mode == "Fast":
+                         # In Fast mode, we proceed with local guess even if missing year,
+                         # but renamer might reject it (will result in "Unknown" likely)
+                         pass
                 
-                # 1. FAST PATH: Local Parse (If not skipped)
+                # 1. FAST PATH: Local Parse (Only if NOT skipped AND NO DB/API match needed yet)
+                # If we have a pre-match, we technically COULD use Fast Path logic if we update guess,
+                # BUT we want to ensure we tag it as "DB". 
+                # So if pre_matched_metadata is set, we skip Fast Path to force using the metadata in Slow Path logic.
+                
                 local_name = None
-                if not skip_local:
+                if not skip_local and not pre_matched_metadata:
                     local_name = self.renamer.generate_name_from_guess(guess, ext, format_string=fmt)
                 
                 if local_name:
@@ -384,13 +457,14 @@ class AutoTitleApp(customtkinter.CTk):
                         known_dirs[dirname] = guess['title'].strip().title()
                     
                     # Check for perfect match
+                    # Tag as "FT" (File Title / Fast Track) logic
                     if local_name == filename:
-                         results.append((file_path, local_name, full_new_path, "Ready (Organize Only)", [local_name]))
+                         results.append((file_path, local_name, full_new_path, "FT", [local_name]))
                     else:
-                         results.append((file_path, local_name, full_new_path, "Ready (Local)", [local_name]))
+                         results.append((file_path, local_name, full_new_path, "FT", [local_name]))
                 
                 # 2. CACHE PATH: Use known show title from siblings
-                elif dirname in known_dirs:
+                elif dirname in known_dirs and not pre_matched_metadata:
                     cached_title = known_dirs[dirname]
                     # We need Season/Episode from guess
                     season = guess.get('season')
@@ -411,34 +485,48 @@ class AutoTitleApp(customtkinter.CTk):
                             inferred_name = f"{cached_title} - {s_str}{e_str}{ext}"
                             
                         full_new_path = os.path.join(dirname, inferred_name)
-                        results.append((file_path, inferred_name, full_new_path, "Ready (Cached)", [inferred_name]))
+                        # Tag as "FT" also? It's inferred locally.
+                        results.append((file_path, inferred_name, full_new_path, "FT", [inferred_name]))
                     else:
                         # Missing number info, can't infer name even with title
-                         results.append((file_path, "Unknown", None, "Skipped", []))
+                         results.append((file_path, "Unknown", None, "Unknown", []))
                          
                 else:
-                    # 3. SLOW PATH: Fetch online metadata
-                    print(f"DEBUG: Local parse insufficient for {filename}, fetching online...")
-                    metadata_list = self.renamer.fetch_metadata(guess, file_path)
-                    proposed_names = self.renamer.propose_rename(file_path, guess, metadata_list, format_string=fmt)
+                    # 3. SLOW PATH: Fetch online metadata (OR Use Pre-Matched Raw Cache)
                     
-                    if proposed_names:
+                    offline_only = (deep_search_mode == "Fast")
+                    
+                    metadata_list = []
+                    if pre_matched_metadata:
+                        metadata_list = pre_matched_metadata
+                    else:
+                        print(f"DEBUG: Local parse insufficient for {filename}, fetching metadata...")
+                        metadata_list = self.renamer.fetch_metadata(guess, file_path, offline_only=offline_only)
+                    
+                    # proposed_names is List[(name, source)]
+                    proposed_tuples = self.renamer.propose_rename(file_path, guess, metadata_list, format_string=fmt)
+                    
+                    if proposed_tuples:
                         # Default to first
-                        best_name = proposed_names[0]
+                        best_name = proposed_tuples[0][0]
+                        source_tag = proposed_tuples[0][1]
+                        
                         dirname = os.path.dirname(file_path)
                         full_new_path = os.path.join(dirname, best_name)
+                        
+                        # Extract just names for options
+                        options = [p[0] for p in proposed_tuples]
                         
                         # Cache the title
                         if guess.get('title'):
                             known_dirs[dirname] = guess['title'].strip().title()
                             
-                        results.append((file_path, best_name, full_new_path, "Ready (Online)", proposed_names))
+                        results.append((file_path, best_name, full_new_path, source_tag, options))
                     else:
-                         results.append((file_path, "Unknown", None, "Skipped", []))
+                         results.append((file_path, "Unknown", None, "Unknown", []))
     
                 # GAP FILLING STEP: Infer titles for unknown files if siblings have matches
-                # Actually, infer_missing_titles runs on the WHOLE list, not one by one.
-                # So we must wait until loop finishes.
+                # ... (infer_missing_titles logic needs update? It uses results structure. We kept it compatible.)
             
             results = self.renamer.infer_missing_titles(results)
             
@@ -481,7 +569,7 @@ class AutoTitleApp(customtkinter.CTk):
              new_name = entry[1]
              
              # Priority 0: Unknown/Skipped
-             if "Unknown" in entry[3] or "Skipped" in entry[3] or not new_name or new_name == "Unknown":
+             if "Unknown" in entry[3] or not new_name or new_name == "Unknown":
                  return (0, orig_name)
              
              # Priority 1: Unchanged (if enabled, we want to see these)
@@ -505,7 +593,7 @@ class AutoTitleApp(customtkinter.CTk):
             
             should_show = True
             if not show_all:
-                if new_name == orig_name and "Unknown" not in status:
+                if new_name == orig_name and status != "Unknown":
                      should_show = False
                 
             if should_show:
@@ -551,7 +639,7 @@ class AutoTitleApp(customtkinter.CTk):
             full_new_path = os.path.join(dirname, new_value)
             
             # Construct new tuple
-            new_entry = (original, new_value, full_new_path, "Ready (User)", entry[4])
+            new_entry = (original, new_value, full_new_path, "Manual", entry[4])
             self.scanned_files[real_index] = new_entry
             print(f"DEBUG: Updated index {real_index} -> {new_value}")
             
@@ -573,7 +661,7 @@ class AutoTitleApp(customtkinter.CTk):
             dirname = os.path.dirname(original)
             new_full_path = os.path.join(dirname, text)
             
-            self.scanned_files[index] = (original, text, new_full_path, "Ready (Manual)", options)
+            self.scanned_files[index] = (original, text, new_full_path, "Manual", options)
             self.render_current_page() # Refresh UI to show selected value
         else:
             self.render_current_page() # Revert selection
@@ -587,12 +675,9 @@ class AutoTitleApp(customtkinter.CTk):
         dirname = os.path.dirname(original)
         parent_name = os.path.basename(dirname)
         
-        # 1. Start with clean filename
-        base_name = os.path.splitext(filename)[0]
-        clean_name = re.sub(r"[\.\-_]", " ", base_name)
-        # Remove common scene tags
-        clean_name = re.sub(r"(1080p|720p|2160p|4k|bluray|web-dl|x264|h264|aac|mp4|mkv|hevc|dvdrip)", "", clean_name, flags=re.IGNORECASE)
-        clean_name = clean_name.strip()
+        # 1. Robust Clean
+        clean_name = self.renamer.sanitize_title(os.path.splitext(filename)[0])
+        print(f"DEBUG: Deep Search Clean Logic: '{filename}' -> '{clean_name}'")
         
         # 2. Get Media Type Context
         type_val = self.type_var.get()
@@ -645,7 +730,9 @@ class AutoTitleApp(customtkinter.CTk):
             
             # Generate names
             _, ext = os.path.splitext(self.scanned_files[index][0])
-            new_names = self.renamer.propose_rename(self.scanned_files[index][0], fake_guess, results, self.settings.get("rename_format"))
+            # proposed_rename returns tuples now!
+            proposed_tuples = self.renamer.propose_rename(self.scanned_files[index][0], fake_guess, results, self.settings.get("rename_format"))
+            new_names = [p[0] for p in proposed_tuples]
             
             # Update Main Thread
             self.after(0, lambda: self._apply_deep_search_results(index, new_names))
@@ -673,12 +760,10 @@ class AutoTitleApp(customtkinter.CTk):
         dirname = os.path.dirname(original)
         new_full_path = os.path.join(dirname, best_new)
         
-        self.scanned_files[index] = (original, best_new, new_full_path, "Ready (Deep Search)", options)
+        self.scanned_files[index] = (original, best_new, new_full_path, "API", options) # Force API status for Deep Search
         self.render_current_page()
         tkinter.messagebox.showinfo("Deep Search", f"Found {len(new_names)} results!")
 
-
-        
     def render_current_page(self):
         # Clear List Area
         for widget in self.file_list_frame.winfo_children():
@@ -703,25 +788,29 @@ class AutoTitleApp(customtkinter.CTk):
         header_frame.pack(fill="x", padx=10, pady=5)
         
         header_frame.grid_columnconfigure(0, weight=1) 
-        header_frame.grid_columnconfigure(1, weight=0) 
-        header_frame.grid_columnconfigure(2, weight=1)
-        header_frame.grid_columnconfigure(3, weight=0)
+        header_frame.grid_columnconfigure(1, weight=0) # Space 
+        header_frame.grid_columnconfigure(2, weight=0) # Tag
+        header_frame.grid_columnconfigure(3, weight=0) # Arrow
+        header_frame.grid_columnconfigure(4, weight=1) # New Name
+        header_frame.grid_columnconfigure(5, weight=0) # Checkbox (Right aligned)
         
         customtkinter.CTkLabel(header_frame, text="Original Names", font=customtkinter.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, sticky="ew")
-        customtkinter.CTkLabel(header_frame, text="", width=20).grid(row=0, column=1)
-        customtkinter.CTkLabel(header_frame, text="New Names", font=customtkinter.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=2, padx=10, sticky="ew")
+        # Empty space
+        
+        customtkinter.CTkLabel(header_frame, text="New Names", font=customtkinter.CTkFont(size=14, weight="bold"), anchor="w").grid(row=0, column=4, padx=10, sticky="ew")
         
         # Checkbox for Show All (Re-create since frame cleared)
         chk = customtkinter.CTkCheckBox(header_frame, text="Show Unchanged Files", variable=self.show_all_var, command=self.display_results)
-        chk.grid(row=0, column=3, padx=10)
+        chk.grid(row=0, column=5, padx=10)
 
         # Scrollable Content
         scroll_frame = customtkinter.CTkScrollableFrame(self.file_list_frame, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
         scroll_frame.grid_columnconfigure(0, weight=1)
-        scroll_frame.grid_columnconfigure(1, weight=0)
-        scroll_frame.grid_columnconfigure(2, weight=1)
+        scroll_frame.grid_columnconfigure(1, weight=0) # Tag
+        scroll_frame.grid_columnconfigure(2, weight=0) # Arrow
+        scroll_frame.grid_columnconfigure(3, weight=1)
         
         for visual_row_idx, real_index in enumerate(page_indices):
             entry = self.scanned_files[real_index]
@@ -729,23 +818,35 @@ class AutoTitleApp(customtkinter.CTk):
             orig_name = os.path.basename(original)
             
             # Color logic
-            color = "white"
-            if "Unknown" in status or "Skipped" in status:
-                color = "#ff5555" 
+            text_color = "white"
+            tag_color = "gray"
+            
+            if "Unknown" in status:
+                tag_color = "#ff5555" # Red
+                text_color = "#ff5555"
                 if not new_name: new_name = "Unknown"
-            elif "Cached" in status or "Renamed" in status or "File OK" in status:
-                color = "#55ff55"
-            elif "Ready" in status: 
-                # Ready is neutral/white usually, or maybe slight green? Keep white.
-                pass
+            elif "DB" in status:
+                tag_color = "#55ff55" # Green
+            elif "API" in status:
+                tag_color = "#55aaff" # Blueish
+            elif "FT" in status:
+                tag_color = "#ffff55" # Yellow
+            elif "Manual" in status:
+                tag_color = "#ffaa55" # Orange
             
             # Render Row
             row_idx = visual_row_idx * 2
             
-            lbl_orig = customtkinter.CTkLabel(scroll_frame, text=orig_name, anchor="w", text_color=color if color != "white" else None)
+            lbl_orig = customtkinter.CTkLabel(scroll_frame, text=orig_name, anchor="w", text_color=text_color if text_color != "white" else None)
             lbl_orig.grid(row=row_idx, column=0, padx=10, pady=5, sticky="ew")
             
-            customtkinter.CTkLabel(scroll_frame, text="➜", text_color="gray").grid(row=row_idx, column=1, padx=5)
+            # Source Tag Label
+            tag_text = status if status in ["DB", "API", "FT", "Manual", "Unknown"] else "FT"
+            lbl_tag = customtkinter.CTkLabel(scroll_frame, text=tag_text, text_color=tag_color, width=40)
+            lbl_tag.grid(row=row_idx, column=1, padx=5)
+            
+            # Arrow
+            customtkinter.CTkLabel(scroll_frame, text="➜", text_color="gray").grid(row=row_idx, column=2, padx=5)
             
             if not options: options = ["Unknown"]
             if new_name and new_name not in options: options.insert(0, new_name)
@@ -762,11 +863,11 @@ class AutoTitleApp(customtkinter.CTk):
             if new_name: combo.set(new_name)
             else: combo.set("Unknown")
                 
-            combo.grid(row=row_idx, column=2, padx=10, pady=5, sticky="ew")
+            combo.grid(row=row_idx, column=3, padx=10, pady=5, sticky="ew")
             
             # Separator
             sep = customtkinter.CTkFrame(scroll_frame, height=2, fg_color=("gray85", "gray25"))
-            sep.grid(row=row_idx+1, column=0, columnspan=3, sticky="ew", padx=10, pady=0)
+            sep.grid(row=row_idx+1, column=0, columnspan=4, sticky="ew", padx=10, pady=0)
             
         # Folders Tab Preview
         self.refresh_folder_preview()

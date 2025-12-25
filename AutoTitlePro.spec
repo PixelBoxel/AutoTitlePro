@@ -3,10 +3,10 @@
 
 a = Analysis(
     ['src\\main.py'],
-    pathex=[],
+    pathex=['src'],
     binaries=[],
     datas=[('C:\\Users\\Conor\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages\\customtkinter', 'customtkinter/'), ('C:\\Users\\Conor\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages\\babelfish', 'babelfish/'), ('C:\\Users\\Conor\\AppData\\Local\\Packages\\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\\LocalCache\\local-packages\\Python312\\site-packages\\guessit', 'guessit/'), ('assets/icon.ico', 'assets/')],
-    hiddenimports=['imdb', 'guessit', 'babelfish', 'PIL._tkinter_finder'],
+    hiddenimports=['imdb', 'guessit', 'babelfish', 'PIL._tkinter_finder', 'renamer', 'cache_manager', 'src.cache_manager'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
